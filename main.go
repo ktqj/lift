@@ -12,10 +12,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	// "log/slog"
+	"log/slog"
 )
 
-// logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+func CleanupAttrs(groups []string, a slog.Attr) slog.Attr {
+	if (a.Key == slog.TimeKey || a.Key == slog.LevelKey) && len(groups) == 0 {
+		return slog.Attr{}
+	}
+	return a
+}
+var log *slog.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{ReplaceAttr: CleanupAttrs}))
 
 type liftStatus int
 
@@ -71,19 +77,22 @@ func (l *Lift) String() string {
 	b.WriteString("]")
 	b.WriteString(separator)
 	b.WriteString(fmt.Sprintf("%v%s%v", l.destinations, separator, l.backlog))
-	b.WriteString("\n")
 	return b.String()
 }
 
 func (l *Lift) setStatus(status liftStatus) {
 	l.status = status
 	if l.status == IDLE {
-		fmt.Printf("Lift #%d becomes idle\n", l.ID)
+		log.Info(fmt.Sprintf("Lift #%d becomes idle", l.ID))
 	} else if l.status == UP {
-		fmt.Printf("Lift #%d starts going up\n", l.ID)
+		log.Info(fmt.Sprintf("Lift #%d starts going up", l.ID))
 	} else if l.status == DOWN {
-		fmt.Printf("Lift #%d starts going down\n", l.ID)
+		log.Info(fmt.Sprintf("Lift #%d starts going down", l.ID))
 	}
+}
+
+func (l *Lift) GetStatus() liftStatus {
+	return l.status
 }
 
 func (l *Lift) AddToBacklog(floorNumber int) {
@@ -112,7 +121,8 @@ func (l *Lift) AddDestination(floorNumber int) {
 	}
 }
 
-func (l *Lift) Call(floorNumber int) (ok bool) {
+func (l *Lift) Call(floorNumber int) bool {
+	//TODO: deciding whether to accept a call should be a part of a pluggable strategy
 	l.m.Lock()
 	defer l.m.Unlock()
 
@@ -124,7 +134,7 @@ func (l *Lift) Call(floorNumber int) (ok bool) {
 	}
 
 	l.AddDestination(floorNumber)
-	fmt.Printf("Lift #%d called to floor %d\n", l.ID, floorNumber)
+	log.Info(fmt.Sprintf("Lift #%d called to floor %d", l.ID, floorNumber))
 	return true
 }
 
@@ -145,7 +155,8 @@ func (l *Lift) PressFloorButton(floorNumber int) {
 	l.AddDestination(floorNumber)
 }
 
-func (l *Lift) UpdateDestinations() {
+func (l *Lift) UpdateRoute() {
+	//TODO: finding best route should be a part of a pluggable strategy
 	l.m.Lock()
 	defer l.m.Unlock()
 
@@ -195,8 +206,7 @@ func (l *Lift) CurrentDestination() int {
 }
 
 func (l *Lift) Park(floor *Floor) {
-	fmt.Printf("Lift #%d opens doors on floor #%d\n", l.ID, floor.Number)
-	l.UpdateDestinations()
+	log.Info(fmt.Sprintf("Lift #%d opens doors on floor #%d", l.ID, floor.Number))
 
 	staying := l.Passengers[:0]
 	for _, p := range l.Passengers {
@@ -204,7 +214,7 @@ func (l *Lift) Park(floor *Floor) {
 			staying = append(staying, p)
 		}
 	}
-	fmt.Printf("Lift #%d unloads %d passengers\n", l.ID, len(l.Passengers) - len(staying))
+	log.Info(fmt.Sprintf("Lift #%d unloads %d passengers", l.ID, len(l.Passengers) - len(staying)))
 	stats.Delivered += len(l.Passengers) - len(staying)
 	l.Passengers = staying
 
@@ -212,11 +222,13 @@ func (l *Lift) Park(floor *Floor) {
 	incoming := floor.Unload(spotsAvailable)
 	l.Passengers = append(l.Passengers, incoming...)
 
-	fmt.Printf("Lift #%d loads %d passengers\n", l.ID, len(incoming))
-	fmt.Print(l.String())
+	log.Info(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
 	for _, p := range incoming {
 		l.PressFloorButton(p.TargetFloor)
 	}
+
+	l.UpdateRoute()
+	log.Info(l.String())
 }
 
 type Floor struct {
@@ -245,7 +257,7 @@ func (f *Floor) Unload(count int) []Passenger {
 		left := f.Waitlist[:0]
 		left = append(left, f.Waitlist[count:]...)
 		f.Waitlist = left
-		fmt.Printf("%d passenger are left on floor #%d\n", len(left), f.Number)
+		log.Info(fmt.Sprintf("%d passenger are left on floor #%d", len(left), f.Number))
 		f.LiftRequests <- f.Number
 	}
 	return unloaded
@@ -270,8 +282,9 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 	}
 
 	lifts := []*Lift{
-		&Lift{ID: 1, Passengers: make([]Passenger, 0, 3)},
-		&Lift{ID: 2, Passengers: make([]Passenger, 0, 3)},
+		&Lift{ID: 1, Passengers: make([]Passenger, 0, 10)},
+		&Lift{ID: 2, Passengers: make([]Passenger, 0, 10)},
+		&Lift{ID: 3, Passengers: make([]Passenger, 0, 10)},
 	}
 
 	b := &Building{
@@ -283,12 +296,12 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 	return b
 }
 
-func (b *Building) ListenCalls(ctx context.Context) {
+func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
 	ticker := time.NewTicker(251 * time.Millisecond)
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("Shutting down lift controller\n")
+			log.Info(fmt.Sprintf("Shutting down lift controller"))
 			return
 		case <-ticker.C:
 			if len(b.Backlog) == 0 {
@@ -296,21 +309,15 @@ func (b *Building) ListenCalls(ctx context.Context) {
 			}
 			newBacklog := b.Backlog[:0]
 			for _, floorNumber := range b.Backlog {
-				ok := false
-				for _, l := range b.Lifts {
-					if ok = l.Call(floorNumber); ok {
-						break
-					}
-				}
-				if ok {
-					continue
+				if ok := caller(floorNumber, b.Lifts...); ok {
+					break
 				}
 				newBacklog = append(newBacklog, floorNumber)
 			}
 			b.Backlog = newBacklog
-			fmt.Printf("Pending requests: %v\n", b.Backlog)
+			log.Info(fmt.Sprintf("Pending requests: %v", b.Backlog))
 		case floorNumber := <-b.LiftRequests:
-			fmt.Printf("Lift requested to floor #%d\n", floorNumber)
+			log.Info(fmt.Sprintf("Lift requested to floor #%d", floorNumber))
 			if slices.Index(b.Backlog, floorNumber) == -1 {
 				b.Backlog = append(b.Backlog, floorNumber)
 			}
@@ -325,7 +332,10 @@ func (b *Building) RunLift(ctx context.Context, l *Lift) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			fmt.Print(l.String())
+			if l.status != IDLE {
+				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
+			}
+
 			if l.CurrentFloor == l.CurrentDestination() {
 				l.Park(b.Floors[l.CurrentFloor])
 			}
@@ -339,8 +349,6 @@ func (b *Building) RunLift(ctx context.Context, l *Lift) {
 			} else if l.status == UP {
 				l.CurrentFloor++
 			}
-
-			fmt.Printf("Lift #%d arrives at floor #%d\n", l.ID, l.CurrentFloor)
 		}
 	}
 }
@@ -363,7 +371,7 @@ func (b *Building) PrintStats(ctx context.Context) {
 				moving += len(l.Passengers)
 			}
 			stats.Moving = moving
-			fmt.Printf("%+v\n", stats)
+			log.Info(fmt.Sprintf("%+v", stats))
 		}
 	}
 }
@@ -372,7 +380,7 @@ func (b *Building) PrintStats(ctx context.Context) {
 func SpawnPassengers(ctx context.Context, b *Building) {
 	time.Sleep(100*time.Millisecond)
 	p := Passenger{0, 7}
-	fmt.Printf("Spawning passenger %s\n", p.String())
+	log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
 	b.Floors[0].AddPassenger(p)
 	stats.Spawned++
 
@@ -380,7 +388,7 @@ func SpawnPassengers(ctx context.Context, b *Building) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("Shutting down passenger generation\n")
+			log.Info("Shutting down passenger generation")
 			return
 		case <-ticker.C:
 			spawnFloorNumber := rand.Intn(len(b.Floors))
@@ -393,7 +401,7 @@ func SpawnPassengers(ctx context.Context, b *Building) {
 			}
 
 			p := Passenger{spawnFloorNumber, targetFloor}
-			fmt.Printf("Spawning passenger %s\n", p.String())
+			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
 			b.Floors[spawnFloorNumber].AddPassenger(p)
 			stats.Spawned++
 		}
@@ -409,15 +417,43 @@ type Stats struct {
 func NewStats() *Stats { return &Stats{} }
 var stats *Stats = NewStats()
 
+// ----------------- //
+type CallableLift interface {
+	Call(floorNumber int) bool
+	GetStatus() liftStatus
+}
+
+type LiftCaller [T CallableLift] func(floorNumber int, lifts ...T) bool
+
+func SimpleCaller(floorNumber int, lifts ...*Lift) bool {
+	// Ask IDLE first, then the rest
+	for _, l := range lifts {
+		if l.GetStatus() == IDLE {
+			if ok := l.Call(floorNumber); ok {
+				return true
+			}
+		}
+	}
+	for _, l := range lifts {
+		if l.GetStatus() != IDLE {
+			if ok := l.Call(floorNumber); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+// ------------------- //
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sigChannel := make(chan os.Signal, 1)
 	signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
 
-	floorsCount := 10
+	floorsCount := 25
 	b := NewBuilding(ctx, floorsCount)
-	go b.ListenCalls(ctx)
+	go b.ListenCalls(ctx, SimpleCaller)
 	for _, lift := range b.Lifts {
 		go b.RunLift(ctx, lift)
 	}
@@ -433,5 +469,5 @@ func main() {
 	}
 	
 	cancel()
-	fmt.Printf("%+v\n", stats)
+	log.Info(fmt.Sprintf("%+v", stats))
 }
