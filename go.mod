@@ -1,3 +1,3 @@
 module example.com/lift
 
-go 1.20
+go 1.21

@@ -1,11 +1,8 @@
 package main
 
 import (
-	// "errors"
 	"context"
-	"debug/buildinfo"
 	"fmt"
-	"go/build"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -18,7 +15,7 @@ import (
 	// "log/slog"
 )
 
-// logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+// logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 type liftStatus int
 
@@ -26,10 +23,9 @@ const (
 	IDLE liftStatus = 0
 	DOWN liftStatus = 1
 	UP liftStatus = 2
-	DefaultLiftCapacity = 5
 )
 
-func popFirst(slice []int) []int {
+func withoutFirst(slice []int) []int {
 	n := slice[:0]
 	return append(n, slice[1:]...)
 }
@@ -57,46 +53,37 @@ type Lift struct {
 
 func (l *Lift) String() string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Lift #%d ", l.ID))
-
+	separator := "|"
+	b.WriteString(fmt.Sprintf("Lift #%d", l.ID))
+	b.WriteString(separator)
 	if l.status == UP {
-		b.WriteString("UP ")
+		b.WriteString("UP")
 	} else if l.status == DOWN {
-		b.WriteString("DOWN ")
+		b.WriteString("DOWN")
 	} else if l.status == IDLE {
-		b.WriteString("IDLE ")
+		b.WriteString("IDLE")
 	}
-
+	b.WriteString(separator)
 	b.WriteString("[")
 	for _, p := range l.Passengers {
 		b.WriteString(p.String())
 	}
-	b.WriteString("] ")
-
-	b.WriteString(fmt.Sprintf("%v %v", l.destinations, l.backlog))
+	b.WriteString("]")
+	b.WriteString(separator)
+	b.WriteString(fmt.Sprintf("%v%s%v", l.destinations, separator, l.backlog))
 	b.WriteString("\n")
 	return b.String()
 }
 
-func (l *Lift) Call(floor *Floor) (ok bool) {
-	if floor.Number == l.CurrentFloor {
-		// THIS IS BAD DESIGN
-		l.LoadUnload(floor)
-		return true
+func (l *Lift) setStatus(status liftStatus) {
+	l.status = status
+	if l.status == IDLE {
+		fmt.Printf("Lift #%d becomes idle\n", l.ID)
+	} else if l.status == UP {
+		fmt.Printf("Lift #%d starts going up\n", l.ID)
+	} else if l.status == DOWN {
+		fmt.Printf("Lift #%d starts going down\n", l.ID)
 	}
-
-	l.m.Lock()
-	defer l.m.Unlock()
-
-	if l.status == DOWN && floor.Number > l.CurrentFloor {
-		return false
-	}
-	if l.status == UP && floor.Number < l.CurrentFloor {
-		return false
-	}
-
-	l.AddDestination(floor.Number)
-	return true
 }
 
 func (l *Lift) AddToBacklog(floorNumber int) {
@@ -118,20 +105,30 @@ func (l *Lift) AddDestination(floorNumber int) {
 
 	if l.status == IDLE {
 		if l.CurrentFloor > floorNumber {
-			l.status = DOWN
-			fmt.Printf("Lift #%d starts going down\n", l.ID)
+			l.setStatus(DOWN)
 		} else if l.CurrentFloor < floorNumber{
-			l.status = UP
-			fmt.Printf("Lift #%d starts going up\n", l.ID)
+			l.setStatus(UP)
 		}
 	}
 }
 
-func (l *Lift) PressButton(floorNumber int) {
-	if floorNumber == l.CurrentFloor {
-		return
+func (l *Lift) Call(floorNumber int) (ok bool) {
+	l.m.Lock()
+	defer l.m.Unlock()
+
+	if l.status == DOWN && floorNumber > l.CurrentFloor {
+		return false
+	}
+	if l.status == UP && floorNumber < l.CurrentFloor {
+		return false
 	}
 
+	l.AddDestination(floorNumber)
+	fmt.Printf("Lift #%d called to floor %d\n", l.ID, floorNumber)
+	return true
+}
+
+func (l *Lift) PressFloorButton(floorNumber int) {
 	l.m.Lock()
 	defer l.m.Unlock()
 
@@ -145,11 +142,6 @@ func (l *Lift) PressButton(floorNumber int) {
 		return
 	}
 
-	if l.status == IDLE && len(l.destinations) != 0 {
-		l.AddToBacklog(floorNumber)
-		return
-	}
-
 	l.AddDestination(floorNumber)
 }
 
@@ -159,8 +151,12 @@ func (l *Lift) UpdateDestinations() {
 
 	if l.status == DOWN {
 		l.destinations = l.destinations[:len(l.destinations) - 1]
-	} else if l.status == UP {
-		l.destinations = popFirst(l.destinations)
+	} 
+	if l.status == UP {
+		l.destinations = withoutFirst(l.destinations)
+	}
+	if l.status == IDLE {
+		l.destinations = l.destinations[:0]
 	}
 
 	if len(l.destinations) != 0 {
@@ -168,8 +164,7 @@ func (l *Lift) UpdateDestinations() {
 	}
 
 	if len(l.backlog) == 0 {
-		l.status = IDLE
-		fmt.Printf("Lift #%d becomes idle\n", l.ID)
+		l.setStatus(IDLE)
 		return
 	}
 
@@ -177,11 +172,9 @@ func (l *Lift) UpdateDestinations() {
 	l.destinations = append(l.destinations, l.backlog...)
 	l.backlog = l.backlog[:0]
 	if l.status == UP {
-		l.status = DOWN
-		fmt.Printf("Lift #%d starts going down\n", l.ID)
+		l.setStatus(DOWN)
 	} else if l.status == DOWN {
-		l.status = UP
-		fmt.Printf("Lift #%d starts going up\n", l.ID)
+		l.setStatus(UP)
 	}
 }
 
@@ -191,14 +184,20 @@ func (l *Lift) CurrentDestination() int {
 
 	if l.status == DOWN {
 		return l.destinations[len(l.destinations) - 1]
-	} else if l.status == UP {
+	}
+	if l.status == UP {
+		return l.destinations[0]
+	}
+	if l.status == IDLE && len(l.destinations) > 0 {
 		return l.destinations[0]
 	}
 	return -1
 }
 
-func (l *Lift) LoadUnload(floor *Floor) {
+func (l *Lift) Park(floor *Floor) {
 	fmt.Printf("Lift #%d opens doors on floor #%d\n", l.ID, floor.Number)
+	l.UpdateDestinations()
+
 	staying := l.Passengers[:0]
 	for _, p := range l.Passengers {
 		if p.TargetFloor != floor.Number {
@@ -206,23 +205,24 @@ func (l *Lift) LoadUnload(floor *Floor) {
 		}
 	}
 	fmt.Printf("Lift #%d unloads %d passengers\n", l.ID, len(l.Passengers) - len(staying))
+	stats.Delivered += len(l.Passengers) - len(staying)
 	l.Passengers = staying
-	// TODO check capacity
-	incoming := floor.Unload()
+
+	spotsAvailable := cap(l.Passengers) - len(l.Passengers)
+	incoming := floor.Unload(spotsAvailable)
 	l.Passengers = append(l.Passengers, incoming...)
 
 	fmt.Printf("Lift #%d loads %d passengers\n", l.ID, len(incoming))
-	fmt.Printf(l.String())
+	fmt.Print(l.String())
 	for _, p := range incoming {
-		l.PressButton(p.TargetFloor)
+		l.PressFloorButton(p.TargetFloor)
 	}
 }
 
-// is this neccessary?
 type Floor struct {
 	Number int
 	Waitlist []Passenger
-	m sync.Mutex
+	m sync.Mutex  // protects Waitlist
 	LiftRequests chan int
 }
 
@@ -233,13 +233,22 @@ func (f *Floor) AddPassenger(p Passenger) {
 	f.LiftRequests <- f.Number
 }
 
-func (f *Floor) Unload() []Passenger {
+func (f *Floor) Unload(count int) []Passenger {
 	f.m.Lock()
 	defer f.m.Unlock()
-	res := make([]Passenger, 0, len(f.Waitlist))
-	res = append(res, f.Waitlist...)
-	f.Waitlist = f.Waitlist[:0]
-	return res
+	unloaded := make([]Passenger, 0, count)
+	if count >= len(f.Waitlist) {
+		unloaded = append(unloaded, f.Waitlist...)
+		f.Waitlist = f.Waitlist[:0]
+	} else {
+		unloaded = append(unloaded, f.Waitlist[:count]...)
+		left := f.Waitlist[:0]
+		left = append(left, f.Waitlist[count:]...)
+		f.Waitlist = left
+		fmt.Printf("%d passenger are left on floor #%d\n", len(left), f.Number)
+		f.LiftRequests <- f.Number
+	}
+	return unloaded
 }
 
 type Building struct {
@@ -261,8 +270,8 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 	}
 
 	lifts := []*Lift{
-		&Lift{ID: 1, Passengers: make([]Passenger, 0, 100)},
-		// &Lift{ID: 2, Passengers: make([]Passenger, 0, 100)},
+		&Lift{ID: 1, Passengers: make([]Passenger, 0, 3)},
+		&Lift{ID: 2, Passengers: make([]Passenger, 0, 3)},
 	}
 
 	b := &Building{
@@ -275,30 +284,33 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 }
 
 func (b *Building) ListenCalls(ctx context.Context) {
-	ticker := time.NewTicker(400 * time.Millisecond)
+	ticker := time.NewTicker(251 * time.Millisecond)
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Printf("Shutting down lift controller\n")
 			return
 		case <-ticker.C:
-			if len(b.Backlog) > 0 {
-				fmt.Printf("Controller backlog: %v\n", b.Backlog)
-				newBacklog := b.Backlog[:0]
-backlog_loop:
-				for _, num := range b.Backlog {
-					for _, l := range b.Lifts {
-						if ok := l.Call(b.Floors[num]); ok == true {
-							fmt.Printf("Successfully called lift #%d[at #%d] to floor #%d\n", l.ID, l.CurrentFloor, num)
-							continue backlog_loop
-						}
-					}
-					newBacklog = append(newBacklog, num)
-				}
-				b.Backlog = newBacklog
+			if len(b.Backlog) == 0 {
+				continue
 			}
+			newBacklog := b.Backlog[:0]
+			for _, floorNumber := range b.Backlog {
+				ok := false
+				for _, l := range b.Lifts {
+					if ok = l.Call(floorNumber); ok {
+						break
+					}
+				}
+				if ok {
+					continue
+				}
+				newBacklog = append(newBacklog, floorNumber)
+			}
+			b.Backlog = newBacklog
+			fmt.Printf("Pending requests: %v\n", b.Backlog)
 		case floorNumber := <-b.LiftRequests:
-			fmt.Printf("Request received: passenger is waiting on floor #%d\n", floorNumber)
+			fmt.Printf("Lift requested to floor #%d\n", floorNumber)
 			if slices.Index(b.Backlog, floorNumber) == -1 {
 				b.Backlog = append(b.Backlog, floorNumber)
 			}
@@ -306,35 +318,65 @@ backlog_loop:
 	}
 }
 
-func (b *Building) RunLifts(ctx context.Context) {
-	ticker := time.NewTicker(1000 * time.Millisecond)
+func (b *Building) RunLift(ctx context.Context, l *Lift) {
+	ticker := time.NewTicker(500 * time.Millisecond)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, l := range b.Lifts {
-				fmt.Printf(l.String())
-				if l.status == DOWN {
-					l.CurrentFloor--
-					fmt.Printf("Lift #%d arrives at floor #%d\n", l.ID, l.CurrentFloor)
-				} else if l.status == UP {
-					l.CurrentFloor++
-					fmt.Printf("Lift #%d arrives at floor #%d\n", l.ID, l.CurrentFloor)
-				}
-
-				if l.CurrentFloor == l.CurrentDestination() {
-					l.UpdateDestinations()
-					l.LoadUnload(b.Floors[l.CurrentFloor])
-				}
+			fmt.Print(l.String())
+			if l.CurrentFloor == l.CurrentDestination() {
+				l.Park(b.Floors[l.CurrentFloor])
 			}
+
+			if l.status == IDLE {
+				continue
+			}
+
+			if l.status == DOWN {
+				l.CurrentFloor--
+			} else if l.status == UP {
+				l.CurrentFloor++
+			}
+
+			fmt.Printf("Lift #%d arrives at floor #%d\n", l.ID, l.CurrentFloor)
+		}
+	}
+}
+
+func (b *Building) PrintStats(ctx context.Context) {
+	ticker := time.NewTicker(1551 * time.Millisecond)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			waiting := 0
+			for _, f := range b.Floors {
+				waiting += len(f.Waitlist)
+			}
+			stats.Waiting = waiting
+
+			moving := 0
+			for _, l := range b.Lifts {
+				moving += len(l.Passengers)
+			}
+			stats.Moving = moving
+			fmt.Printf("%+v\n", stats)
 		}
 	}
 }
 
 
 func SpawnPassengers(ctx context.Context, b *Building) {
-	ticker := time.NewTicker(2*time.Second)
+	time.Sleep(100*time.Millisecond)
+	p := Passenger{0, 7}
+	fmt.Printf("Spawning passenger %s\n", p.String())
+	b.Floors[0].AddPassenger(p)
+	stats.Spawned++
+
+	ticker := time.NewTicker(749*time.Millisecond)
 	for {
 		select {
 		case <-ctx.Done():
@@ -353,9 +395,19 @@ func SpawnPassengers(ctx context.Context, b *Building) {
 			p := Passenger{spawnFloorNumber, targetFloor}
 			fmt.Printf("Spawning passenger %s\n", p.String())
 			b.Floors[spawnFloorNumber].AddPassenger(p)
+			stats.Spawned++
 		}
 	}
 }
+
+type Stats struct {
+	Spawned int
+	Delivered int
+	Waiting int
+	Moving int
+}
+func NewStats() *Stats { return &Stats{} }
+var stats *Stats = NewStats()
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -366,11 +418,20 @@ func main() {
 	floorsCount := 10
 	b := NewBuilding(ctx, floorsCount)
 	go b.ListenCalls(ctx)
-	go b.RunLifts(ctx)
-	go SpawnPassengers(ctx, b)
+	for _, lift := range b.Lifts {
+		go b.RunLift(ctx, lift)
+	}
+	go b.PrintStats(ctx)
+
+	spawnCtx, spawnCancel := context.WithCancel(context.Background())
+	go SpawnPassengers(spawnCtx, b)
 
 	<-sigChannel
+	spawnCancel()
+	for stats.Spawned != stats.Delivered {
+		time.Sleep(100 * time.Microsecond)
+	}
+	
 	cancel()
-	time.Sleep(100 * time.Microsecond)
-	os.Exit(0)
+	fmt.Printf("%+v\n", stats)
 }
