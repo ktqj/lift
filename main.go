@@ -40,7 +40,7 @@ const (
 	DOWN liftStatus = 1
 	UP liftStatus = 2
 
-	tickDuration = 50 * time.Millisecond
+	tickDuration = 10 * time.Millisecond
 )
 
 func withoutFirst(slice []int) []int {
