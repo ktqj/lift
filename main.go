@@ -301,9 +301,9 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 	}
 
 	lifts := []*Lift{
-		&Lift{ID: 1, Passengers: make([]Passenger, 0, 10)},
-		&Lift{ID: 2, Passengers: make([]Passenger, 0, 10)},
-		&Lift{ID: 3, Passengers: make([]Passenger, 0, 10)},
+		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
+		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
+		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
 	}
 
 	b := &Building{
@@ -520,7 +520,6 @@ main_loop:
 	}
 
 	cancel()
-	log.Info(fmt.Sprintf("%+v", stats))
 
 	totalWaitTime := 0
 	totalMovingTime := 0
