@@ -40,7 +40,7 @@ const (
 	DOWN liftStatus = 1
 	UP liftStatus = 2
 
-	tickDuration = 100 * time.Millisecond
+	tickDuration = 50 * time.Millisecond
 )
 
 func withoutFirst(slice []int) []int {
@@ -230,14 +230,13 @@ func (l *Lift) Park(floor *Floor, clock int) {
 
 	spotsAvailable := cap(l.Passengers) - len(l.Passengers)
 	incoming := floor.Unload(spotsAvailable)
-	l.Passengers = append(l.Passengers, incoming...)
-
-	log.Info(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
 	for _, p := range incoming {
 		p.Pickedup = clock
+		l.Passengers = append(l.Passengers, p)
 		l.PressFloorButton(p.TargetFloor)
 	}
 
+	log.Info(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
 	l.UpdateRoute()
 	log.Info(l.String())
 }
@@ -330,7 +329,7 @@ func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
 			newBacklog := b.Backlog[:0]
 			for _, floorNumber := range b.Backlog {
 				if ok := caller(floorNumber, b.Lifts...); ok {
-					break
+					continue
 				}
 				newBacklog = append(newBacklog, floorNumber)
 			}
@@ -421,7 +420,6 @@ func (b *Building) PrintStats(ctx context.Context) {
 
 
 func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
-	// TODO: sometimes not all passengers are picked up
 	ticker := time.NewTicker(tickDuration + tickDuration / 2)
 	for {
 		select {
