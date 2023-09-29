@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -12,7 +13,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"log/slog"
 )
 
 func CleanupAttrs(groups []string, a slog.Attr) slog.Attr {
@@ -24,11 +24,23 @@ func CleanupAttrs(groups []string, a slog.Attr) slog.Attr {
 var log *slog.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{ReplaceAttr: CleanupAttrs}))
 
 type liftStatus int
+func (s liftStatus) String() string {
+	if s == UP {
+		return "UP"
+	} else if s == DOWN {
+		return "DOWN"
+	} else if s == IDLE {
+		return "IDLE"
+	}
+	return "UNKNOWN"
+}
 
 const (
 	IDLE liftStatus = 0
 	DOWN liftStatus = 1
 	UP liftStatus = 2
+
+	tickDuration = 100 * time.Millisecond
 )
 
 func withoutFirst(slice []int) []int {
@@ -39,6 +51,9 @@ func withoutFirst(slice []int) []int {
 type Passenger struct {
 	StartingFloor int
 	TargetFloor int
+	Born int  // world clock's time when spawned
+	Pickedup int  // world clock's time when entered a lift
+	Delivered int  // world clock's time when delivered
 }
 
 func (p Passenger) String() string {
@@ -47,7 +62,6 @@ func (p Passenger) String() string {
 
 type Lift struct {
 	ID int
-	// add lock for passengers?
 	Passengers []Passenger
 	CurrentFloor int
 
@@ -62,13 +76,7 @@ func (l *Lift) String() string {
 	separator := "|"
 	b.WriteString(fmt.Sprintf("Lift #%d", l.ID))
 	b.WriteString(separator)
-	if l.status == UP {
-		b.WriteString("UP")
-	} else if l.status == DOWN {
-		b.WriteString("DOWN")
-	} else if l.status == IDLE {
-		b.WriteString("IDLE")
-	}
+	b.WriteString(l.status.String())
 	b.WriteString(separator)
 	b.WriteString("[")
 	for _, p := range l.Passengers {
@@ -205,17 +213,19 @@ func (l *Lift) CurrentDestination() int {
 	return -1
 }
 
-func (l *Lift) Park(floor *Floor) {
+func (l *Lift) Park(floor *Floor, clock int) {
 	log.Info(fmt.Sprintf("Lift #%d opens doors on floor #%d", l.ID, floor.Number))
 
 	staying := l.Passengers[:0]
 	for _, p := range l.Passengers {
 		if p.TargetFloor != floor.Number {
 			staying = append(staying, p)
+		} else {
+			p.Delivered = clock
+			floor.AddDelivered(p)
 		}
 	}
 	log.Info(fmt.Sprintf("Lift #%d unloads %d passengers", l.ID, len(l.Passengers) - len(staying)))
-	stats.Delivered += len(l.Passengers) - len(staying)
 	l.Passengers = staying
 
 	spotsAvailable := cap(l.Passengers) - len(l.Passengers)
@@ -224,6 +234,7 @@ func (l *Lift) Park(floor *Floor) {
 
 	log.Info(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
 	for _, p := range incoming {
+		p.Pickedup = clock
 		l.PressFloorButton(p.TargetFloor)
 	}
 
@@ -233,8 +244,9 @@ func (l *Lift) Park(floor *Floor) {
 
 type Floor struct {
 	Number int
+	Delivered []Passenger
 	Waitlist []Passenger
-	m sync.Mutex  // protects Waitlist
+	m sync.Mutex  // protects Waitlist and Delivered
 	LiftRequests chan int
 }
 
@@ -243,6 +255,12 @@ func (f *Floor) AddPassenger(p Passenger) {
 	defer f.m.Unlock()
 	f.Waitlist = append(f.Waitlist, p)
 	f.LiftRequests <- f.Number
+}
+
+func (f *Floor) AddDelivered(p Passenger) {
+	f.m.Lock()
+	defer f.m.Unlock()
+	f.Delivered = append(f.Delivered, p)
 }
 
 func (f *Floor) Unload(count int) []Passenger {
@@ -264,6 +282,7 @@ func (f *Floor) Unload(count int) []Passenger {
 }
 
 type Building struct {
+	Clock int // Counts world's ticks, 1 tick is the time required for a lift to move 1 floor
 	Floors map[int]*Floor
 	Lifts []*Lift
 	LiftRequests chan int
@@ -277,6 +296,7 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 		floors[i] = &Floor{
 			Number: i,
 			Waitlist: make([]Passenger, 0, 100),
+			Delivered: make([]Passenger, 0, 100),
 			LiftRequests: liftRequests,
 		}
 	}
@@ -297,7 +317,7 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 }
 
 func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
-	ticker := time.NewTicker(251 * time.Millisecond)
+	ticker := time.NewTicker(tickDuration / 2)
 	for {
 		select {
 		case <-ctx.Done():
@@ -325,19 +345,42 @@ func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
 	}
 }
 
-func (b *Building) RunLift(ctx context.Context, l *Lift) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+func (b *Building) RunLifts(ctx context.Context) {
+	clock := time.NewTicker(tickDuration)
+	liftClocks := make([]chan struct{}, 0, len(b.Lifts))
+	for _, l := range b.Lifts {
+		liftClock := make(chan struct{}, 1)
+		liftClocks = append(liftClocks, liftClock)
+		go b.RunLift(ctx, l, liftClock)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			for _, c := range liftClocks {
+				close(c)
+			}
+			return
+		case <-clock.C:
+			b.Clock++
+			for _, c := range liftClocks {
+				c <- struct{}{}
+			}
+		}
+	}
+}
+
+func (b *Building) RunLift(ctx context.Context, l *Lift, worldClock chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-worldClock:
 			if l.status != IDLE {
 				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
 			}
 
 			if l.CurrentFloor == l.CurrentDestination() {
-				l.Park(b.Floors[l.CurrentFloor])
+				l.Park(b.Floors[l.CurrentFloor], b.Clock)
 			}
 
 			if l.status == IDLE {
@@ -354,37 +397,32 @@ func (b *Building) RunLift(ctx context.Context, l *Lift) {
 }
 
 func (b *Building) PrintStats(ctx context.Context) {
-	ticker := time.NewTicker(1551 * time.Millisecond)
+	ticker := time.NewTicker(tickDuration + tickDuration / 2)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			waiting := 0
+			stats.Waiting = 0
+			stats.Delivered = 0
 			for _, f := range b.Floors {
-				waiting += len(f.Waitlist)
+				stats.Waiting += len(f.Waitlist)
+				stats.Delivered += len(f.Delivered)
 			}
-			stats.Waiting = waiting
 
-			moving := 0
+			stats.Moving = 0
 			for _, l := range b.Lifts {
-				moving += len(l.Passengers)
+				stats.Moving += len(l.Passengers)
 			}
-			stats.Moving = moving
 			log.Info(fmt.Sprintf("%+v", stats))
 		}
 	}
 }
 
 
-func SpawnPassengers(ctx context.Context, b *Building) {
-	time.Sleep(100*time.Millisecond)
-	p := Passenger{0, 7}
-	log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
-	b.Floors[0].AddPassenger(p)
-	stats.Spawned++
-
-	ticker := time.NewTicker(749*time.Millisecond)
+func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
+	// TODO: sometimes not all passengers are picked up
+	ticker := time.NewTicker(tickDuration + tickDuration / 2)
 	for {
 		select {
 		case <-ctx.Done():
@@ -400,15 +438,23 @@ func SpawnPassengers(ctx context.Context, b *Building) {
 				targetFloor = rand.Intn(len(b.Floors))
 			}
 
-			p := Passenger{spawnFloorNumber, targetFloor}
+			p := Passenger{
+				StartingFloor: spawnFloorNumber,
+				TargetFloor: targetFloor,
+				Born: b.Clock,
+			}
 			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
 			b.Floors[spawnFloorNumber].AddPassenger(p)
 			stats.Spawned++
+			if stats.Spawned == maxPassengers {
+				return
+			}
 		}
 	}
 }
 
 type Stats struct {
+	// m sync.Mutex
 	Spawned int
 	Delivered int
 	Waiting int
@@ -454,20 +500,49 @@ func main() {
 	floorsCount := 25
 	b := NewBuilding(ctx, floorsCount)
 	go b.ListenCalls(ctx, SimpleCaller)
-	for _, lift := range b.Lifts {
-		go b.RunLift(ctx, lift)
-	}
+	go b.RunLifts(ctx)
 	go b.PrintStats(ctx)
 
 	spawnCtx, spawnCancel := context.WithCancel(context.Background())
-	go SpawnPassengers(spawnCtx, b)
+	maxPassengers := 100
+	go SpawnPassengers(spawnCtx, b, maxPassengers)
 
-	<-sigChannel
-	spawnCancel()
-	for stats.Spawned != stats.Delivered {
-		time.Sleep(100 * time.Microsecond)
+main_loop:
+	for {
+		select {
+		case <-sigChannel:
+			spawnCancel()
+			break main_loop
+		default:
+			if stats.Delivered == maxPassengers {
+				break main_loop
+			}
+			time.Sleep(tickDuration)
+		}
 	}
-	
+
 	cancel()
 	log.Info(fmt.Sprintf("%+v", stats))
+
+	totalWaitTime := 0
+	totalMovingTime := 0
+	totalFloorsMoved := 0
+	for _, f := range b.Floors {
+		for _, p := range f.Delivered {
+			totalWaitTime += p.Pickedup - p.Born
+			totalMovingTime += p.Delivered - p.Pickedup
+			floorsMoved := p.TargetFloor - p.StartingFloor
+			if floorsMoved < 0 { floorsMoved = -floorsMoved }
+			totalFloorsMoved += floorsMoved
+		}
+	}
+
+	log.Info(fmt.Sprintf(
+		"Average passenger waited - %f ticks, was moving - %f ticks, moved - %f floors",
+		float64(totalWaitTime) / float64(stats.Spawned),
+		float64(totalMovingTime) / float64(stats.Spawned),
+		float64(totalFloorsMoved) / float64(stats.Spawned),
+	))
+
+
 }
