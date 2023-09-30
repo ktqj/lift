@@ -40,7 +40,7 @@ const (
 	DOWN liftStatus = 1
 	UP liftStatus = 2
 
-	tickDuration = 10 * time.Millisecond
+	tickDuration = 1 * time.Millisecond
 )
 
 func withoutFirst(slice []int) []int {
@@ -134,6 +134,10 @@ func (l *Lift) Call(floorNumber int) bool {
 	l.m.Lock()
 	defer l.m.Unlock()
 
+	if floorNumber == l.CurrentFloor && cap(l.Passengers) == len(l.Passengers) {
+		return false
+	}
+
 	if l.status == DOWN && floorNumber > l.CurrentFloor {
 		return false
 	}
@@ -215,7 +219,6 @@ func (l *Lift) CurrentDestination() int {
 
 func (l *Lift) Park(floor *Floor, clock int) {
 	log.Info(fmt.Sprintf("Lift #%d opens doors on floor #%d", l.ID, floor.Number))
-
 	staying := l.Passengers[:0]
 	for _, p := range l.Passengers {
 		if p.TargetFloor != floor.Number {
@@ -320,7 +323,7 @@ func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info(fmt.Sprintf("Shutting down lift controller"))
+			log.Info("Shutting down lift controller")
 			return
 		case <-ticker.C:
 			if len(b.Backlog) == 0 {
@@ -345,7 +348,7 @@ func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
 }
 
 func (b *Building) RunLifts(ctx context.Context) {
-	clock := time.NewTicker(tickDuration)
+	worldClock := time.NewTicker(tickDuration)
 	liftClocks := make([]chan struct{}, 0, len(b.Lifts))
 	for _, l := range b.Lifts {
 		liftClock := make(chan struct{}, 1)
@@ -359,7 +362,7 @@ func (b *Building) RunLifts(ctx context.Context) {
 				close(c)
 			}
 			return
-		case <-clock.C:
+		case <-worldClock.C:
 			b.Clock++
 			for _, c := range liftClocks {
 				c <- struct{}{}
@@ -502,7 +505,7 @@ func main() {
 	go b.PrintStats(ctx)
 
 	spawnCtx, spawnCancel := context.WithCancel(context.Background())
-	maxPassengers := 100
+	maxPassengers := 200
 	go SpawnPassengers(spawnCtx, b, maxPassengers)
 
 main_loop:
