@@ -137,7 +137,9 @@ func (l *Lift) Call(floorNumber int) bool {
 	if floorNumber == l.CurrentFloor && cap(l.Passengers) == len(l.Passengers) {
 		return false
 	}
-
+	if floorNumber == l.CurrentFloor && l.status != IDLE {
+		return false
+	}
 	if l.status == DOWN && floorNumber > l.CurrentFloor {
 		return false
 	}
@@ -297,8 +299,8 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 	for i := 0; i < floorsCount; i++ {
 		floors[i] = &Floor{
 			Number: i,
-			Waitlist: make([]Passenger, 0, 100),
-			Delivered: make([]Passenger, 0, 100),
+			Waitlist: make([]Passenger, 0, 200),
+			Delivered: make([]Passenger, 0, 200),
 			LiftRequests: liftRequests,
 		}
 	}
@@ -307,6 +309,8 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 4, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 5, Passengers: make([]Passenger, 0, 5)},
 	}
 
 	b := &Building{
@@ -505,7 +509,7 @@ func main() {
 	go b.PrintStats(ctx)
 
 	spawnCtx, spawnCancel := context.WithCancel(context.Background())
-	maxPassengers := 200
+	maxPassengers := 500
 	go SpawnPassengers(spawnCtx, b, maxPassengers)
 
 main_loop:
