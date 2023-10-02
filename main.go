@@ -252,33 +252,29 @@ func (l *Lift) Park(floor *Floor) {
 	log.Info(l.String())
 }
 
-func (l *Lift) Run(ctx context.Context, floors map[int]*Floor, worldTicker chan struct{}) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-worldTicker:
-			l.Clock++
+func (l *Lift) Run(worldTicker chan struct{}, floors map[int]*Floor) {
+	for _ = range worldTicker {
+		l.Clock++
 
-			if l.status != IDLE {
-				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
-			}
+		if l.status != IDLE {
+			log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
+		}
 
-			if l.CurrentFloor == l.CurrentDestination() {
-				l.Park(floors[l.CurrentFloor])
-			}
+		if l.CurrentFloor == l.CurrentDestination() {
+			l.Park(floors[l.CurrentFloor])
+		}
 
-			if l.status == IDLE {
-				continue
-			}
+		if l.status == IDLE {
+			continue
+		}
 
-			if l.status == DOWN {
-				l.CurrentFloor--
-			} else if l.status == UP {
-				l.CurrentFloor++
-			}
+		if l.status == DOWN {
+			l.CurrentFloor--
+		} else if l.status == UP {
+			l.CurrentFloor++
 		}
 	}
+	log.Info(fmt.Sprintf("Shutting down lift #%d", l.ID))
 }
 
 type Floor struct {
@@ -448,7 +444,7 @@ func (b *Building) RunLifts(ctx context.Context) {
 	for _, l := range b.Lifts {
 		t := make(chan struct{}, 1)
 		liftTickers = append(liftTickers, t)
-		go l.Run(ctx, b.Floors, t)
+		go l.Run(t, b.Floors)
 	}
 	for {
 		select {
@@ -490,8 +486,7 @@ func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
 				TargetFloor: targetFloor,
 				Born: b.Clock,
 			}
-			log.Info(fmt.Sprintf(
-				"Spawning passenger %s", p.String()))
+			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
 			b.Floors[spawnFloorNumber].AddPassenger(p)
 			count++
 			if count == maxPassengers {
