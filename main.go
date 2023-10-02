@@ -424,7 +424,7 @@ type Building struct {
 	Lifts []*Lift
 }
 
-func NewBuilding(ctx context.Context, floorsCount int, maxPassengers int) *Building {
+func NewBuilding(floorsCount int, maxPassengers int) *Building {
 	floors := make(map[int]*Floor, floorsCount)
 	for i := 0; i < floorsCount; i++ {
 		floors[i] = NewFloor(i, maxPassengers)
@@ -511,7 +511,7 @@ func NewStats() *Stats {
 	return &Stats{}
 }
 
-func (s *Stats) PrintStats(ctx context.Context, b *Building) {
+func (s *Stats) Collect(ctx context.Context, b *Building) {
 	ticker := time.NewTicker(tickDuration + tickDuration / 2)
 	for {
 		select {
@@ -534,6 +534,29 @@ func (s *Stats) PrintStats(ctx context.Context, b *Building) {
 	}
 }
 
+func (s *Stats) PrintFinalStats(b *Building) {
+	totalWaitTime := 0
+	totalMovingTime := 0
+	totalFloorsMoved := 0
+	for _, f := range b.Floors {
+		for _, p := range f.Delivered {
+			totalWaitTime += p.Pickedup - p.Born
+			totalMovingTime += p.Delivered - p.Pickedup
+			floorsMoved := p.TargetFloor - p.StartingFloor
+			if floorsMoved < 0 { floorsMoved = -floorsMoved }
+			totalFloorsMoved += floorsMoved
+		}
+	}
+
+	totalPassengers := s.Delivered + s.Moving + s.Waiting
+	log.Info(fmt.Sprintf(
+		"Average passenger waited - %f ticks, was moving - %f ticks, moved - %f floors",
+		float64(totalWaitTime) / float64(totalPassengers),
+		float64(totalMovingTime) / float64(totalPassengers),
+		float64(totalFloorsMoved) / float64(totalPassengers),
+	))
+}
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -543,7 +566,7 @@ func main() {
 	floorsCount := 25
 	maxPassengers := 500
 
-	b := NewBuilding(ctx, floorsCount, maxPassengers)
+	b := NewBuilding(floorsCount, maxPassengers)
 	go b.RunLifts(ctx)
 
 	r := NewRequestManager(floorsCount)
@@ -551,7 +574,7 @@ func main() {
 	go r.Run(ctx, b.Lifts)
 	
 	stats := NewStats()
-	go stats.PrintStats(ctx, b)
+	go stats.Collect(ctx, b)
 
 	spawnCtx, spawnCancel := context.WithCancel(context.Background())
 	go SpawnPassengers(spawnCtx, b, maxPassengers)
@@ -571,24 +594,5 @@ main_loop:
 	}
 
 	cancel()
-
-	totalWaitTime := 0
-	totalMovingTime := 0
-	totalFloorsMoved := 0
-	for _, f := range b.Floors {
-		for _, p := range f.Delivered {
-			totalWaitTime += p.Pickedup - p.Born
-			totalMovingTime += p.Delivered - p.Pickedup
-			floorsMoved := p.TargetFloor - p.StartingFloor
-			if floorsMoved < 0 { floorsMoved = -floorsMoved }
-			totalFloorsMoved += floorsMoved
-		}
-	}
-
-	log.Info(fmt.Sprintf(
-		"Average passenger waited - %f ticks, was moving - %f ticks, moved - %f floors",
-		float64(totalWaitTime) / float64(maxPassengers),
-		float64(totalMovingTime) / float64(maxPassengers),
-		float64(totalFloorsMoved) / float64(maxPassengers),
-	))
+	stats.PrintFinalStats(b)
 }
