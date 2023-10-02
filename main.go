@@ -96,10 +96,6 @@ func (l *Lift) setStatus(status liftStatus) {
 	}
 }
 
-func (l *Lift) GetStatus() liftStatus {
-	return l.status
-}
-
 func (l *Lift) IsFloorAlongTheWay(floorNumber int) bool {
 	if l.status == DOWN && floorNumber < l.CurrentFloor {
 		return true
@@ -160,7 +156,6 @@ func (l *Lift) PressFloorButton(floorNumber int) {
 }
 
 func (l *Lift) UpdateRoute() {
-	//TODO: finding best route should be a part of a pluggable strategy
 	l.m.Lock()
 	defer l.m.Unlock()
 
@@ -259,9 +254,6 @@ func (l *Lift) Run(worldTicker chan struct{}, floors map[int]*Floor) {
 		} else if l.status == UP {
 			l.CurrentFloor++
 		}
-		// if l.CurrentFloor < 0 || l.CurrentFloor > len(floors) {
-		// 	panic("oops")
-		// }
 	}
 	log.Info(fmt.Sprintf("Shutting down lift #%d", l.ID))
 }
@@ -336,14 +328,14 @@ func NewRequestManager(floorsCount int) *RequestManager {
 func (r *RequestManager) FindLift(floorNumber int, lifts []*Lift) bool {
 	// Ask IDLE first, then the rest
 	for _, l := range lifts {
-		if l.GetStatus() == IDLE {
+		if l.status == IDLE {
 			if ok := l.Call(floorNumber); ok {
 				return true
 			}
 		}
 	}
 	for _, l := range lifts {
-		if l.GetStatus() != IDLE {
+		if l.status != IDLE {
 			if ok := l.Call(floorNumber); ok {
 				return true
 			}
