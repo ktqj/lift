@@ -44,11 +44,6 @@ const (
 	tickDuration = 1 * time.Millisecond
 )
 
-func withoutFirst(slice []int) []int {
-	n := slice[:0]
-	return append(n, slice[1:]...)
-}
-
 type Passenger struct {
 	StartingFloor int
 	TargetFloor int
@@ -184,7 +179,9 @@ func (l *Lift) UpdateRoute() {
 		l.destinations = l.destinations[:len(l.destinations) - 1]
 	} 
 	if l.status == UP {
-		l.destinations = withoutFirst(l.destinations)
+		// pop first element
+		n := l.destinations[:0]
+		l.destinations = append(n, l.destinations[1:]...)
 	}
 	if l.status == IDLE {
 		l.destinations = l.destinations[:0]
