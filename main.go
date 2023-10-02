@@ -250,7 +250,7 @@ func (l *Lift) Park(floor *Floor) {
 }
 
 func (l *Lift) Run(worldTicker chan struct{}, floors map[int]*Floor) {
-	for _ = range worldTicker {
+	for range worldTicker {
 		l.Clock++
 
 		if l.status != IDLE {
@@ -282,11 +282,11 @@ type Floor struct {
 	button chan struct{}  // buffered with capacity of 1
 }
 
-func NewFloor(floorNumber int, maxPassengers int) *Floor {
+func NewFloor(floorNumber int) *Floor {
 	return &Floor{
 		Number: floorNumber,
-		Waitlist: make([]Passenger, 0, maxPassengers),
-		Delivered: make([]Passenger, 0, maxPassengers),
+		Waitlist: make([]Passenger, 0),
+		Delivered: make([]Passenger, 0),
 		button: make(chan struct{}, 1),
 	}
 }
@@ -314,7 +314,7 @@ func (f *Floor) AddDelivered(p Passenger) {
 func (f *Floor) Unload(count int) []Passenger {
 	f.m.Lock()
 	defer f.m.Unlock()
-	unloaded := make([]Passenger, 0, count)
+	unloaded := make([]Passenger, 0)
 	if count >= len(f.Waitlist) {
 		unloaded = append(unloaded, f.Waitlist...)
 		f.Waitlist = f.Waitlist[:0]
@@ -420,7 +420,7 @@ type Building struct {
 func NewBuilding(floorsCount int, maxPassengers int) *Building {
 	floors := make(map[int]*Floor, floorsCount)
 	for i := 0; i < floorsCount; i++ {
-		floors[i] = NewFloor(i, maxPassengers)
+		floors[i] = NewFloor(i)
 	}
 
 	lifts := []*Lift{
