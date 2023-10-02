@@ -289,11 +289,11 @@ type Floor struct {
 	button chan struct{}  // buffered with capacity of 1
 }
 
-func NewFloor(floorNumber int) *Floor {
+func NewFloor(floorNumber int, maxPassengers int) *Floor {
 	return &Floor{
 		Number: floorNumber,
-		Waitlist: make([]Passenger, 0, 500),
-		Delivered: make([]Passenger, 0, 500),
+		Waitlist: make([]Passenger, 0, maxPassengers),
+		Delivered: make([]Passenger, 0, maxPassengers),
 		button: make(chan struct{}, 1),
 	}
 }
@@ -425,10 +425,10 @@ type Building struct {
 	Lifts []*Lift
 }
 
-func NewBuilding(ctx context.Context, floorsCount int) *Building {
+func NewBuilding(ctx context.Context, floorsCount int, maxPassengers int) *Building {
 	floors := make(map[int]*Floor, floorsCount)
 	for i := 0; i < floorsCount; i++ {
-		floors[i] = NewFloor(i)
+		floors[i] = NewFloor(i, maxPassengers)
 	}
 
 	lifts := []*Lift{
@@ -543,14 +543,15 @@ func main() {
 	signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
 
 	floorsCount := 25
-	b := NewBuilding(ctx, floorsCount)
+	maxPassengers := 500
+
+	b := NewBuilding(ctx, floorsCount, maxPassengers)
 	r := NewRequestManager(floorsCount)
 	go r.Run(ctx, b)
 	go b.RunLifts(ctx)
 	go stats.PrintStats(ctx, b)
 
 	spawnCtx, spawnCancel := context.WithCancel(context.Background())
-	maxPassengers := 500
 	go SpawnPassengers(spawnCtx, b, maxPassengers)
 
 main_loop:
