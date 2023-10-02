@@ -336,12 +336,93 @@ func (f *Floor) Unload(count int) []Passenger {
 	return unloaded
 }
 
+type RequestManager struct {
+	backlog []int
+	requests chan int
+}
+
+func NewRequestManager(floorsCount int) *RequestManager {
+	return &RequestManager{
+		backlog: make([]int, 0, floorsCount),
+		requests: make(chan int),
+	}
+}
+
+func (r *RequestManager) CallLift(floorNumber int, lifts []*Lift) bool {
+	// Ask IDLE first, then the rest
+	for _, l := range lifts {
+		if l.GetStatus() == IDLE {
+			if ok := l.Call(floorNumber); ok {
+				return true
+			}
+		}
+	}
+	for _, l := range lifts {
+		if l.GetStatus() != IDLE {
+			if ok := l.Call(floorNumber); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *RequestManager) ListenFloors(ctx context.Context, floors map[int]*Floor) {
+	cases := make([]reflect.SelectCase, 0, len(floors) + 1)
+	for i := 0; i < len(floors); i++ {
+		cases = append(cases, reflect.SelectCase{
+			Dir: reflect.SelectRecv,
+			Chan: reflect.ValueOf(floors[i].button),
+		})
+	}
+	cases = append(cases, reflect.SelectCase{
+		Dir: reflect.SelectRecv,
+		Chan: reflect.ValueOf(ctx.Done()),
+	})
+	for {
+		floorNumber, _, _ := reflect.Select(cases)
+		if floorNumber == len(floors) {
+			log.Info("Shutting down request manager")
+			return
+		}
+		r.requests <- floorNumber
+	}
+}
+
+func (r *RequestManager) Run(ctx context.Context, b *Building) {
+	go r.ListenFloors(ctx, b.Floors)
+	ticker := time.NewTicker(tickDuration / 2)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("Shutting down lift controller")
+			return
+		case <-ticker.C:
+			if len(r.backlog) == 0 {
+				continue
+			}
+			newBacklog := r.backlog[:0]
+			for _, floorNumber := range r.backlog {
+				if ok := r.CallLift(floorNumber, b.Lifts); ok {
+					continue
+				}
+				newBacklog = append(newBacklog, floorNumber)
+			}
+			r.backlog = newBacklog
+			log.Info(fmt.Sprintf("Pending requests: %v", r.backlog))
+		case floorNumber := <- r.requests:
+			log.Info(fmt.Sprintf("Lift requested to floor #%d", floorNumber))
+			if slices.Index(r.backlog, floorNumber) == -1 {
+				r.backlog = append(r.backlog, floorNumber)
+			}
+		}
+	}
+}
+
 type Building struct {
 	Clock int // Counts world's ticks, 1 tick is the time required for a lift to move 1 floor
 	Floors map[int]*Floor
 	Lifts []*Lift
-	requests chan int
-	Backlog []int
 }
 
 func NewBuilding(ctx context.Context, floorsCount int) *Building {
@@ -354,79 +435,11 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 4, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 5, Passengers: make([]Passenger, 0, 5)},
 	}
 
-	b := &Building{
+	return &Building{
 		Floors: floors,
 		Lifts: lifts,
-		requests: make(chan int),
-		Backlog: make([]int, 0, floorsCount),
-	}
-	return b
-}
-
-func (b *Building) CallLift(floorNumber int) bool {
-	// Ask IDLE first, then the rest
-	for _, l := range b.Lifts {
-		if l.GetStatus() == IDLE {
-			if ok := l.Call(floorNumber); ok {
-				return true
-			}
-		}
-	}
-	for _, l := range b.Lifts {
-		if l.GetStatus() != IDLE {
-			if ok := l.Call(floorNumber); ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (b *Building) ListenFloors(ctx context.Context) {
-	cases := make([]reflect.SelectCase, 0, len(b.Floors))
-	for i := 0; i < len(b.Floors); i++ {
-		cases = append(cases, reflect.SelectCase{
-			Dir: reflect.SelectRecv,
-			Chan: reflect.ValueOf(b.Floors[i].button),
-		})
-	}
-	for {
-		floorNumber, _, _ := reflect.Select(cases)
-		b.requests <- floorNumber
-	}
-}
-
-func (b *Building) ManageRequests(ctx context.Context) {
-	go b.ListenFloors(ctx)
-	ticker := time.NewTicker(tickDuration / 2)
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info("Shutting down lift controller")
-			return
-		case <-ticker.C:
-			if len(b.Backlog) == 0 {
-				continue
-			}
-			newBacklog := b.Backlog[:0]
-			for _, floorNumber := range b.Backlog {
-				if ok := b.CallLift(floorNumber); ok {
-					continue
-				}
-				newBacklog = append(newBacklog, floorNumber)
-			}
-			b.Backlog = newBacklog
-			log.Info(fmt.Sprintf("Pending requests: %v", b.Backlog))
-		case floorNumber := <- b.requests:
-			log.Info(fmt.Sprintf("Lift requested to floor #%d", floorNumber))
-			if slices.Index(b.Backlog, floorNumber) == -1 {
-				b.Backlog = append(b.Backlog, floorNumber)
-			}
-		}
 	}
 }
 
@@ -453,30 +466,6 @@ func (b *Building) RunLifts(ctx context.Context) {
 		}
 	}
 }
-
-func (b *Building) PrintStats(ctx context.Context) {
-	ticker := time.NewTicker(tickDuration + tickDuration / 2)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			stats.Waiting = 0
-			stats.Delivered = 0
-			for _, f := range b.Floors {
-				stats.Waiting += len(f.Waitlist)
-				stats.Delivered += len(f.Delivered)
-			}
-
-			stats.Moving = 0
-			for _, l := range b.Lifts {
-				stats.Moving += len(l.Passengers)
-			}
-			log.Info(fmt.Sprintf("%+v", stats))
-		}
-	}
-}
-
 
 func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
 	ticker := time.NewTicker(tickDuration + tickDuration / 2)
@@ -517,8 +506,35 @@ type Stats struct {
 	Waiting int
 	Moving int
 }
-func NewStats() *Stats { return &Stats{} }
+
+func NewStats() *Stats {
+	return &Stats{}
+}
+
+func (s *Stats) PrintStats(ctx context.Context, b *Building) {
+	ticker := time.NewTicker(tickDuration + tickDuration / 2)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats.Waiting = 0
+			stats.Delivered = 0
+			for _, f := range b.Floors {
+				stats.Waiting += len(f.Waitlist)
+				stats.Delivered += len(f.Delivered)
+			}
+
+			stats.Moving = 0
+			for _, l := range b.Lifts {
+				stats.Moving += len(l.Passengers)
+			}
+			log.Info(fmt.Sprintf("%+v", stats))
+		}
+	}
+}
 var stats *Stats = NewStats()
+
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -528,9 +544,10 @@ func main() {
 
 	floorsCount := 25
 	b := NewBuilding(ctx, floorsCount)
-	go b.ManageRequests(ctx)
+	r := NewRequestManager(floorsCount)
+	go r.Run(ctx, b)
 	go b.RunLifts(ctx)
-	go b.PrintStats(ctx)
+	go stats.PrintStats(ctx, b)
 
 	spawnCtx, spawnCancel := context.WithCancel(context.Background())
 	maxPassengers := 500
