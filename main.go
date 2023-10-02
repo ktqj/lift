@@ -469,10 +469,12 @@ func (b *Building) RunLifts(ctx context.Context) {
 
 func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
 	ticker := time.NewTicker(tickDuration + tickDuration / 2)
+	count := 0
 	for {
 		select {
 		case <-ctx.Done():
 			log.Info("Shutting down passenger generation")
+			log.Info(fmt.Sprintf("Spawned %d passengers in total", count))
 			return
 		case <-ticker.C:
 			spawnFloorNumber := rand.Intn(len(b.Floors))
@@ -489,10 +491,11 @@ func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
 				TargetFloor: targetFloor,
 				Born: b.Clock,
 			}
-			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
+			log.Info(fmt.Sprintf(
+				"Spawning passenger %s", p.String()))
 			b.Floors[spawnFloorNumber].AddPassenger(p)
-			stats.Spawned++
-			if stats.Spawned == maxPassengers {
+			count++
+			if count == maxPassengers {
 				return
 			}
 		}
@@ -500,8 +503,6 @@ func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
 }
 
 type Stats struct {
-	// m sync.Mutex
-	Spawned int
 	Delivered int
 	Waiting int
 	Moving int
@@ -585,8 +586,8 @@ main_loop:
 
 	log.Info(fmt.Sprintf(
 		"Average passenger waited - %f ticks, was moving - %f ticks, moved - %f floors",
-		float64(totalWaitTime) / float64(stats.Spawned),
-		float64(totalMovingTime) / float64(stats.Spawned),
-		float64(totalFloorsMoved) / float64(stats.Spawned),
+		float64(totalWaitTime) / float64(maxPassengers),
+		float64(totalMovingTime) / float64(maxPassengers),
+		float64(totalFloorsMoved) / float64(maxPassengers),
 	))
 }
