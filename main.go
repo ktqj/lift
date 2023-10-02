@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -259,7 +260,7 @@ func (l *Lift) Run(ctx context.Context, floors map[int]*Floor, worldTicker chan 
 		case <-worldTicker:
 			l.Clock++
 
-			if l.status == IDLE {
+			if l.status != IDLE {
 				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
 			}
 
@@ -285,14 +286,30 @@ type Floor struct {
 	Delivered []Passenger
 	Waitlist []Passenger
 	m sync.Mutex  // protects Waitlist and Delivered
-	LiftRequests chan int
+	button chan struct{}  // buffered with capacity of 1
+}
+
+func NewFloor(floorNumber int) *Floor {
+	return &Floor{
+		Number: floorNumber,
+		Waitlist: make([]Passenger, 0, 500),
+		Delivered: make([]Passenger, 0, 500),
+		button: make(chan struct{}, 1),
+	}
+}
+
+func (f *Floor) RequestLift() {
+	select {
+	case f.button <- struct{}{}:
+	default:
+	}
 }
 
 func (f *Floor) AddPassenger(p Passenger) {
 	f.m.Lock()
 	defer f.m.Unlock()
 	f.Waitlist = append(f.Waitlist, p)
-	f.LiftRequests <- f.Number
+	f.RequestLift()
 }
 
 func (f *Floor) AddDelivered(p Passenger) {
@@ -314,7 +331,7 @@ func (f *Floor) Unload(count int) []Passenger {
 		left = append(left, f.Waitlist[count:]...)
 		f.Waitlist = left
 		log.Info(fmt.Sprintf("%d passenger are left on floor #%d", len(left), f.Number))
-		f.LiftRequests <- f.Number
+		f.RequestLift()
 	}
 	return unloaded
 }
@@ -323,20 +340,14 @@ type Building struct {
 	Clock int // Counts world's ticks, 1 tick is the time required for a lift to move 1 floor
 	Floors map[int]*Floor
 	Lifts []*Lift
-	LiftRequests chan int
+	requests chan int
 	Backlog []int
 }
 
 func NewBuilding(ctx context.Context, floorsCount int) *Building {
-	liftRequests := make(chan int)
 	floors := make(map[int]*Floor, floorsCount)
 	for i := 0; i < floorsCount; i++ {
-		floors[i] = &Floor{
-			Number: i,
-			Waitlist: make([]Passenger, 0, 200),
-			Delivered: make([]Passenger, 0, 200),
-			LiftRequests: liftRequests,
-		}
+		floors[i] = NewFloor(i)
 	}
 
 	lifts := []*Lift{
@@ -350,7 +361,7 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 	b := &Building{
 		Floors: floors,
 		Lifts: lifts,
-		LiftRequests: liftRequests,
+		requests: make(chan int),
 		Backlog: make([]int, 0, floorsCount),
 	}
 	return b
@@ -375,7 +386,22 @@ func (b *Building) CallLift(floorNumber int) bool {
 	return false
 }
 
-func (b *Building) ListenCalls(ctx context.Context) {
+func (b *Building) ListenFloors(ctx context.Context) {
+	cases := make([]reflect.SelectCase, 0, len(b.Floors))
+	for i := 0; i < len(b.Floors); i++ {
+		cases = append(cases, reflect.SelectCase{
+			Dir: reflect.SelectRecv,
+			Chan: reflect.ValueOf(b.Floors[i].button),
+		})
+	}
+	for {
+		floorNumber, _, _ := reflect.Select(cases)
+		b.requests <- floorNumber
+	}
+}
+
+func (b *Building) ManageRequests(ctx context.Context) {
+	go b.ListenFloors(ctx)
 	ticker := time.NewTicker(tickDuration / 2)
 	for {
 		select {
@@ -395,7 +421,7 @@ func (b *Building) ListenCalls(ctx context.Context) {
 			}
 			b.Backlog = newBacklog
 			log.Info(fmt.Sprintf("Pending requests: %v", b.Backlog))
-		case floorNumber := <-b.LiftRequests:
+		case floorNumber := <- b.requests:
 			log.Info(fmt.Sprintf("Lift requested to floor #%d", floorNumber))
 			if slices.Index(b.Backlog, floorNumber) == -1 {
 				b.Backlog = append(b.Backlog, floorNumber)
@@ -502,7 +528,7 @@ func main() {
 
 	floorsCount := 25
 	b := NewBuilding(ctx, floorsCount)
-	go b.ListenCalls(ctx)
+	go b.ManageRequests(ctx)
 	go b.RunLifts(ctx)
 	go b.PrintStats(ctx)
 
