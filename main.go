@@ -62,6 +62,7 @@ func (p Passenger) String() string {
 
 type Lift struct {
 	ID int
+	Clock int
 	Passengers []Passenger
 	CurrentFloor int
 
@@ -133,6 +134,10 @@ func (l *Lift) Call(floorNumber int) bool {
 	//TODO: deciding whether to accept a call should be a part of a pluggable strategy
 	l.m.Lock()
 	defer l.m.Unlock()
+
+	if slices.Index(l.destinations, floorNumber) != -1 {
+		return true
+	}
 
 	if floorNumber == l.CurrentFloor && cap(l.Passengers) == len(l.Passengers) {
 		return false
@@ -219,14 +224,14 @@ func (l *Lift) CurrentDestination() int {
 	return -1
 }
 
-func (l *Lift) Park(floor *Floor, clock int) {
+func (l *Lift) Park(floor *Floor) {
 	log.Info(fmt.Sprintf("Lift #%d opens doors on floor #%d", l.ID, floor.Number))
 	staying := l.Passengers[:0]
 	for _, p := range l.Passengers {
 		if p.TargetFloor != floor.Number {
 			staying = append(staying, p)
 		} else {
-			p.Delivered = clock
+			p.Delivered = l.Clock
 			floor.AddDelivered(p)
 		}
 	}
@@ -236,7 +241,7 @@ func (l *Lift) Park(floor *Floor, clock int) {
 	spotsAvailable := cap(l.Passengers) - len(l.Passengers)
 	incoming := floor.Unload(spotsAvailable)
 	for _, p := range incoming {
-		p.Pickedup = clock
+		p.Pickedup = l.Clock
 		l.Passengers = append(l.Passengers, p)
 		l.PressFloorButton(p.TargetFloor)
 	}
@@ -244,6 +249,35 @@ func (l *Lift) Park(floor *Floor, clock int) {
 	log.Info(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
 	l.UpdateRoute()
 	log.Info(l.String())
+}
+
+func (l *Lift) Run(ctx context.Context, floors map[int]*Floor, worldTicker chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-worldTicker:
+			l.Clock++
+
+			if l.status == IDLE {
+				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
+			}
+
+			if l.CurrentFloor == l.CurrentDestination() {
+				l.Park(floors[l.CurrentFloor])
+			}
+
+			if l.status == IDLE {
+				continue
+			}
+
+			if l.status == DOWN {
+				l.CurrentFloor--
+			} else if l.status == UP {
+				l.CurrentFloor++
+			}
+		}
+	}
 }
 
 type Floor struct {
@@ -322,7 +356,26 @@ func NewBuilding(ctx context.Context, floorsCount int) *Building {
 	return b
 }
 
-func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
+func (b *Building) CallLift(floorNumber int) bool {
+	// Ask IDLE first, then the rest
+	for _, l := range b.Lifts {
+		if l.GetStatus() == IDLE {
+			if ok := l.Call(floorNumber); ok {
+				return true
+			}
+		}
+	}
+	for _, l := range b.Lifts {
+		if l.GetStatus() != IDLE {
+			if ok := l.Call(floorNumber); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *Building) ListenCalls(ctx context.Context) {
 	ticker := time.NewTicker(tickDuration / 2)
 	for {
 		select {
@@ -335,7 +388,7 @@ func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
 			}
 			newBacklog := b.Backlog[:0]
 			for _, floorNumber := range b.Backlog {
-				if ok := caller(floorNumber, b.Lifts...); ok {
+				if ok := b.CallLift(floorNumber); ok {
 					continue
 				}
 				newBacklog = append(newBacklog, floorNumber)
@@ -352,51 +405,24 @@ func (b *Building) ListenCalls(ctx context.Context, caller LiftCaller[*Lift]) {
 }
 
 func (b *Building) RunLifts(ctx context.Context) {
-	worldClock := time.NewTicker(tickDuration)
-	liftClocks := make([]chan struct{}, 0, len(b.Lifts))
+	worldTicker := time.NewTicker(tickDuration)
+	liftTickers := make([]chan struct{}, 0, len(b.Lifts))
 	for _, l := range b.Lifts {
-		liftClock := make(chan struct{}, 1)
-		liftClocks = append(liftClocks, liftClock)
-		go b.RunLift(ctx, l, liftClock)
+		t := make(chan struct{}, 1)
+		liftTickers = append(liftTickers, t)
+		go l.Run(ctx, b.Floors, t)
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			for _, c := range liftClocks {
+			for _, c := range liftTickers {
 				close(c)
 			}
 			return
-		case <-worldClock.C:
+		case <-worldTicker.C:
 			b.Clock++
-			for _, c := range liftClocks {
+			for _, c := range liftTickers {
 				c <- struct{}{}
-			}
-		}
-	}
-}
-
-func (b *Building) RunLift(ctx context.Context, l *Lift, worldClock chan struct{}) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-worldClock:
-			if l.status != IDLE {
-				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
-			}
-
-			if l.CurrentFloor == l.CurrentDestination() {
-				l.Park(b.Floors[l.CurrentFloor], b.Clock)
-			}
-
-			if l.status == IDLE {
-				continue
-			}
-
-			if l.status == DOWN {
-				l.CurrentFloor--
-			} else if l.status == UP {
-				l.CurrentFloor++
 			}
 		}
 	}
@@ -468,34 +494,6 @@ type Stats struct {
 func NewStats() *Stats { return &Stats{} }
 var stats *Stats = NewStats()
 
-// ----------------- //
-type CallableLift interface {
-	Call(floorNumber int) bool
-	GetStatus() liftStatus
-}
-
-type LiftCaller [T CallableLift] func(floorNumber int, lifts ...T) bool
-
-func SimpleCaller(floorNumber int, lifts ...*Lift) bool {
-	// Ask IDLE first, then the rest
-	for _, l := range lifts {
-		if l.GetStatus() == IDLE {
-			if ok := l.Call(floorNumber); ok {
-				return true
-			}
-		}
-	}
-	for _, l := range lifts {
-		if l.GetStatus() != IDLE {
-			if ok := l.Call(floorNumber); ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-// ------------------- //
-
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -504,7 +502,7 @@ func main() {
 
 	floorsCount := 25
 	b := NewBuilding(ctx, floorsCount)
-	go b.ListenCalls(ctx, SimpleCaller)
+	go b.ListenCalls(ctx)
 	go b.RunLifts(ctx)
 	go b.PrintStats(ctx)
 
@@ -547,6 +545,4 @@ main_loop:
 		float64(totalMovingTime) / float64(stats.Spawned),
 		float64(totalFloorsMoved) / float64(stats.Spawned),
 	))
-
-
 }
