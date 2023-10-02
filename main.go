@@ -330,7 +330,7 @@ func (f *Floor) Unload(count int) []Passenger {
 		left := f.Waitlist[:0]
 		left = append(left, f.Waitlist[count:]...)
 		f.Waitlist = left
-		log.Info(fmt.Sprintf("%d passenger are left on floor #%d", len(left), f.Number))
+		log.Info(fmt.Sprintf("%d passengers are left on floor #%d", len(left), f.Number))
 		f.RequestLift()
 	}
 	return unloaded
@@ -389,8 +389,7 @@ func (r *RequestManager) ListenFloors(ctx context.Context, floors map[int]*Floor
 	}
 }
 
-func (r *RequestManager) Run(ctx context.Context, b *Building) {
-	go r.ListenFloors(ctx, b.Floors)
+func (r *RequestManager) Run(ctx context.Context, lifts []*Lift) {
 	ticker := time.NewTicker(tickDuration / 2)
 	for {
 		select {
@@ -403,7 +402,7 @@ func (r *RequestManager) Run(ctx context.Context, b *Building) {
 			}
 			newBacklog := r.backlog[:0]
 			for _, floorNumber := range r.backlog {
-				if ok := r.CallLift(floorNumber, b.Lifts); ok {
+				if ok := r.CallLift(floorNumber, lifts); ok {
 					continue
 				}
 				newBacklog = append(newBacklog, floorNumber)
@@ -548,7 +547,8 @@ func main() {
 	go b.RunLifts(ctx)
 
 	r := NewRequestManager(floorsCount)
-	go r.Run(ctx, b)
+	go r.ListenFloors(ctx, b.Floors)
+	go r.Run(ctx, b.Lifts)
 	
 	stats := NewStats()
 	go stats.PrintStats(ctx, b)
