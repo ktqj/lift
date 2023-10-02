@@ -149,7 +149,7 @@ func (l *Lift) Call(floorNumber int) bool {
 	}
 
 	l.AddDestination(floorNumber)
-	log.Info(fmt.Sprintf("Lift #%d called to floor %d", l.ID, floorNumber))
+	log.Info(fmt.Sprintf("Lift #%d accepted a call to floor #%d", l.ID, floorNumber))
 	return true
 }
 
@@ -341,7 +341,7 @@ func NewRequestManager(floorsCount int) *RequestManager {
 	}
 }
 
-func (r *RequestManager) CallLift(floorNumber int, lifts []*Lift) bool {
+func (r *RequestManager) FindLift(floorNumber int, lifts []*Lift) bool {
 	// Ask IDLE first, then the rest
 	for _, l := range lifts {
 		if l.GetStatus() == IDLE {
@@ -393,14 +393,14 @@ func (r *RequestManager) Run(ctx context.Context, lifts []*Lift) {
 			if len(r.backlog) == 0 {
 				continue
 			}
-			newBacklog := r.backlog[:0]
+			n := r.backlog[:0]
 			for _, floorNumber := range r.backlog {
-				if ok := r.CallLift(floorNumber, lifts); ok {
+				if ok := r.FindLift(floorNumber, lifts); ok {
 					continue
 				}
-				newBacklog = append(newBacklog, floorNumber)
+				n = append(n, floorNumber)
 			}
-			r.backlog = newBacklog
+			r.backlog = n
 			log.Info(fmt.Sprintf("Pending requests: %v", r.backlog))
 		case floorNumber := <- r.requests:
 			log.Info(fmt.Sprintf("Lift requested to floor #%d", floorNumber))
@@ -417,7 +417,7 @@ type Building struct {
 	Lifts []*Lift
 }
 
-func NewBuilding(floorsCount int, maxPassengers int) *Building {
+func NewBuilding(floorsCount int) *Building {
 	floors := make(map[int]*Floor, floorsCount)
 	for i := 0; i < floorsCount; i++ {
 		floors[i] = NewFloor(i)
@@ -460,7 +460,7 @@ func (b *Building) RunLifts(ctx context.Context) {
 }
 
 func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
-	ticker := time.NewTicker(tickDuration + tickDuration / 2)
+	ticker := time.NewTicker(tickDuration * 2)
 	count := 0
 	for {
 		select {
@@ -485,6 +485,7 @@ func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
 			}
 			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
 			b.Floors[spawnFloorNumber].AddPassenger(p)
+
 			count++
 			if count == maxPassengers {
 				return
@@ -497,10 +498,6 @@ type Stats struct {
 	Delivered int
 	Waiting int
 	Moving int
-}
-
-func NewStats() *Stats {
-	return &Stats{}
 }
 
 func (s *Stats) Collect(ctx context.Context, b *Building) {
@@ -558,29 +555,24 @@ func main() {
 	floorsCount := 25
 	maxPassengers := 500
 
-	b := NewBuilding(floorsCount, maxPassengers)
+	b := NewBuilding(floorsCount)
 	go b.RunLifts(ctx)
 
 	r := NewRequestManager(floorsCount)
 	go r.ListenFloors(ctx, b.Floors)
 	go r.Run(ctx, b.Lifts)
 	
-	stats := NewStats()
+	var stats Stats
 	go stats.Collect(ctx, b)
 
-	spawnCtx, spawnCancel := context.WithCancel(context.Background())
-	go SpawnPassengers(spawnCtx, b, maxPassengers)
+	go SpawnPassengers(ctx, b, maxPassengers)
 
 main_loop:
-	for {
+	for stats.Delivered != maxPassengers {
 		select {
 		case <-sigChannel:
-			spawnCancel()
 			break main_loop
 		default:
-			if stats.Delivered == maxPassengers {
-				break main_loop
-			}
 			time.Sleep(tickDuration)
 		}
 	}
