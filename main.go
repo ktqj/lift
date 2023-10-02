@@ -519,23 +519,21 @@ func (s *Stats) PrintStats(ctx context.Context, b *Building) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			stats.Waiting = 0
-			stats.Delivered = 0
+			s.Waiting = 0
+			s.Delivered = 0
 			for _, f := range b.Floors {
-				stats.Waiting += len(f.Waitlist)
-				stats.Delivered += len(f.Delivered)
+				s.Waiting += len(f.Waitlist)
+				s.Delivered += len(f.Delivered)
 			}
 
-			stats.Moving = 0
+			s.Moving = 0
 			for _, l := range b.Lifts {
-				stats.Moving += len(l.Passengers)
+				s.Moving += len(l.Passengers)
 			}
-			log.Info(fmt.Sprintf("%+v", stats))
+			log.Info(fmt.Sprintf("%+v", s))
 		}
 	}
 }
-var stats *Stats = NewStats()
-
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -547,9 +545,12 @@ func main() {
 	maxPassengers := 500
 
 	b := NewBuilding(ctx, floorsCount, maxPassengers)
+	go b.RunLifts(ctx)
+
 	r := NewRequestManager(floorsCount)
 	go r.Run(ctx, b)
-	go b.RunLifts(ctx)
+	
+	stats := NewStats()
 	go stats.PrintStats(ctx, b)
 
 	spawnCtx, spawnCancel := context.WithCancel(context.Background())
