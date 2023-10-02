@@ -100,6 +100,16 @@ func (l *Lift) GetStatus() liftStatus {
 	return l.status
 }
 
+func (l *Lift) IsFloorAlongTheWay(floorNumber int) bool {
+	if l.status == DOWN && floorNumber < l.CurrentFloor {
+		return true
+	}
+	if l.status == UP && floorNumber > l.CurrentFloor {
+		return true
+	}
+	return false
+}
+
 func (l *Lift) AddToBacklog(floorNumber int) {
 	if slices.Index(l.backlog, floorNumber) != -1 {
 		return
@@ -118,7 +128,7 @@ func (l *Lift) AddDestination(floorNumber int) {
 	sort.Slice(l.destinations, func(i, j int) bool { return l.destinations[i] < l.destinations[j] })
 
 	if l.status == IDLE {
-		if l.CurrentFloor > floorNumber {
+		if l.CurrentFloor >= floorNumber {
 			l.setStatus(DOWN)
 		} else if l.CurrentFloor < floorNumber{
 			l.setStatus(UP)
@@ -127,47 +137,26 @@ func (l *Lift) AddDestination(floorNumber int) {
 }
 
 func (l *Lift) Call(floorNumber int) bool {
-	//TODO: deciding whether to accept a call should be a part of a pluggable strategy
 	l.m.Lock()
 	defer l.m.Unlock()
 
-	if slices.Index(l.destinations, floorNumber) != -1 {
+	if l.status == IDLE || l.IsFloorAlongTheWay(floorNumber) {
+		log.Info(fmt.Sprintf("Lift #%d accepted call to floor #%d", l.ID, floorNumber))
+		l.AddDestination(floorNumber)
 		return true
 	}
-
-	if floorNumber == l.CurrentFloor && cap(l.Passengers) == len(l.Passengers) {
-		return false
-	}
-	if floorNumber == l.CurrentFloor && l.status != IDLE {
-		return false
-	}
-	if l.status == DOWN && floorNumber > l.CurrentFloor {
-		return false
-	}
-	if l.status == UP && floorNumber < l.CurrentFloor {
-		return false
-	}
-
-	l.AddDestination(floorNumber)
-	log.Info(fmt.Sprintf("Lift #%d accepted a call to floor #%d", l.ID, floorNumber))
-	return true
+	return false
 }
 
 func (l *Lift) PressFloorButton(floorNumber int) {
 	l.m.Lock()
 	defer l.m.Unlock()
 
-	if l.status == DOWN && floorNumber > l.CurrentFloor {
+	if l.IsFloorAlongTheWay(floorNumber) {
+		l.AddDestination(floorNumber)
+	} else {
 		l.AddToBacklog(floorNumber)
-		return
 	}
-
-	if l.status == UP && floorNumber < l.CurrentFloor {
-		l.AddToBacklog(floorNumber)
-		return
-	}
-
-	l.AddDestination(floorNumber)
 }
 
 func (l *Lift) UpdateRoute() {
@@ -270,6 +259,9 @@ func (l *Lift) Run(worldTicker chan struct{}, floors map[int]*Floor) {
 		} else if l.status == UP {
 			l.CurrentFloor++
 		}
+		// if l.CurrentFloor < 0 || l.CurrentFloor > len(floors) {
+		// 	panic("oops")
+		// }
 	}
 	log.Info(fmt.Sprintf("Shutting down lift #%d", l.ID))
 }
