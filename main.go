@@ -312,15 +312,14 @@ type LiftManager struct {
 }
 
 func NewLiftManager() *LiftManager {
-	lifts := []*Lift{
+	return &LiftManager{Lifts: []*Lift{
 		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
 		// &Lift{ID: 4, Passengers: make([]Passenger, 0, 5)},
 		// &Lift{ID: 5, Passengers: make([]Passenger, 0, 5)},
 		// &Lift{ID: 6, Passengers: make([]Passenger, 0, 5)},
-	}
-	return &LiftManager{Lifts: lifts}
+	}}
 }
 
 func (m *LiftManager) FindLift(floorNumber int) bool {
@@ -367,8 +366,6 @@ func (m *LiftManager) Run(ctx context.Context, floors map[int]*Floor) {
 	}
 }
 
-type LiftFinder func (floorNumber int) bool
-
 type RequestManager struct {
 	m sync.Mutex
 	backlog []int
@@ -404,7 +401,7 @@ func (r *RequestManager) Listen(ctx context.Context, floors map[int]*Floor) {
 	}
 }
 
-func (r *RequestManager) ProcessRequests(ctx context.Context, liftFinder LiftFinder) {
+func (r *RequestManager) ProcessRequests(ctx context.Context, liftFinder func (floorNumber int) bool) {
 	ticker := time.NewTicker(tickDuration / 2)
 	for {
 		select {
@@ -441,11 +438,10 @@ func NewBuilding(floorsCount int) *Building {
 
 func (b *Building) SpawnPassengers(ctx context.Context, maxPassengers int) {
 	ticker := time.NewTicker(2*tickDuration)
-	for i := 1; i <= maxPassengers; i++ {
+	for i := 0; i < maxPassengers; i++ {
 		select {
 		case <-ctx.Done():
 			log.Info("Shutting down passenger generation")
-			log.Info(fmt.Sprintf("Spawned %d passengers in total", i))
 			return
 		case <-ticker.C:
 			spawnFloorNumber := rand.Intn(len(b.Floors))
