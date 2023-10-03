@@ -41,7 +41,7 @@ const (
 	DOWN liftStatus = 1
 	UP liftStatus = 2
 
-	tickDuration = 1 * time.Millisecond
+	tickDuration = 50 * time.Microsecond
 )
 
 type Passenger struct {
@@ -161,13 +161,11 @@ func (l *Lift) UpdateRoute() {
 
 	if l.status == DOWN {
 		l.destinations = l.destinations[:len(l.destinations) - 1]
-	} 
-	if l.status == UP {
+	} else if l.status == UP {
 		// pop first element
 		n := l.destinations[:0]
 		l.destinations = append(n, l.destinations[1:]...)
-	}
-	if l.status == IDLE {
+	}else if l.status == IDLE {
 		l.destinations = l.destinations[:0]
 	}
 
@@ -180,7 +178,6 @@ func (l *Lift) UpdateRoute() {
 		return
 	}
 
-	// change direction to opposite
 	l.destinations = append(l.destinations, l.backlog...)
 	l.backlog = l.backlog[:0]
 	if l.status == UP {
@@ -411,6 +408,9 @@ func NewBuilding(floorsCount int) *Building {
 		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
 		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 4, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 5, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 6, Passengers: make([]Passenger, 0, 5)},
 	}
 
 	return &Building{
@@ -444,7 +444,7 @@ func (b *Building) RunLifts(ctx context.Context) {
 }
 
 func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
-	ticker := time.NewTicker(tickDuration * 2)
+	ticker := time.NewTicker(2*tickDuration)
 	count := 0
 	for {
 		select {
@@ -485,7 +485,7 @@ type Stats struct {
 }
 
 func (s *Stats) Collect(ctx context.Context, b *Building) {
-	ticker := time.NewTicker(tickDuration + tickDuration / 2)
+	ticker := time.NewTicker(tickDuration)
 	for {
 		select {
 		case <-ctx.Done():
@@ -537,7 +537,7 @@ func main() {
 	signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
 
 	floorsCount := 25
-	maxPassengers := 500
+	maxPassengers := 1000
 
 	b := NewBuilding(floorsCount)
 	go b.RunLifts(ctx)
