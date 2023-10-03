@@ -310,38 +310,39 @@ func (f *Floor) Unload(count int) []Passenger {
 	return unloaded
 }
 
-type RequestManager struct {
-	backlog []int
-	requests chan int
-}
+type LiftFinder func (floorNumber int) bool
 
-func NewRequestManager(floorsCount int) *RequestManager {
-	return &RequestManager{
-		backlog: make([]int, 0, floorsCount),
-		requests: make(chan int),
-	}
-}
-
-func (r *RequestManager) FindLift(floorNumber int, lifts []*Lift) bool {
+func FindLift(floorNumber int, lifts []*Lift) bool {
 	// Ask IDLE first, then the rest
 	for _, l := range lifts {
-		if l.status == IDLE {
-			if ok := l.Call(floorNumber); ok {
-				return true
-			}
+		if l.status != IDLE {
+			continue
+		}
+		if ok := l.Call(floorNumber); ok {
+			return true
 		}
 	}
 	for _, l := range lifts {
-		if l.status != IDLE {
-			if ok := l.Call(floorNumber); ok {
-				return true
-			}
+		if l.status == IDLE {
+			continue
+		}
+		if ok := l.Call(floorNumber); ok {
+			return true
 		}
 	}
 	return false
 }
 
-func (r *RequestManager) ListenFloors(ctx context.Context, floors map[int]*Floor) {
+type RequestManager struct {
+	m sync.Mutex
+	backlog []int
+}
+
+func NewRequestManager(floorsCount int) *RequestManager {
+	return &RequestManager{backlog: make([]int, 0, floorsCount)}
+}
+
+func (r *RequestManager) Listen(ctx context.Context, floors map[int]*Floor) {
 	cases := make([]reflect.SelectCase, 0, len(floors) + 1)
 	for i := 0; i < len(floors); i++ {
 		cases = append(cases, reflect.SelectCase{
@@ -359,11 +360,15 @@ func (r *RequestManager) ListenFloors(ctx context.Context, floors map[int]*Floor
 			log.Info("Shutting down request manager")
 			return
 		}
-		r.requests <- floorNumber
+		r.m.Lock()
+		if slices.Index(r.backlog, floorNumber) == -1 {
+			r.backlog = append(r.backlog, floorNumber)
+		}
+		r.m.Unlock()
 	}
 }
 
-func (r *RequestManager) Run(ctx context.Context, lifts []*Lift) {
+func (r *RequestManager) ProcessRequests(ctx context.Context, liftFinder LiftFinder) {
 	ticker := time.NewTicker(tickDuration / 2)
 	for {
 		select {
@@ -371,23 +376,17 @@ func (r *RequestManager) Run(ctx context.Context, lifts []*Lift) {
 			log.Info("Shutting down lift controller")
 			return
 		case <-ticker.C:
-			if len(r.backlog) == 0 {
-				continue
-			}
+			r.m.Lock()
 			n := r.backlog[:0]
 			for _, floorNumber := range r.backlog {
-				if ok := r.FindLift(floorNumber, lifts); ok {
+				if ok := liftFinder(floorNumber); ok {
 					continue
 				}
 				n = append(n, floorNumber)
 			}
 			r.backlog = n
 			log.Info(fmt.Sprintf("Pending requests: %v", r.backlog))
-		case floorNumber := <- r.requests:
-			log.Info(fmt.Sprintf("Lift requested to floor #%d", floorNumber))
-			if slices.Index(r.backlog, floorNumber) == -1 {
-				r.backlog = append(r.backlog, floorNumber)
-			}
+			r.m.Unlock()
 		}
 	}
 }
@@ -543,8 +542,8 @@ func main() {
 	go b.RunLifts(ctx)
 
 	r := NewRequestManager(floorsCount)
-	go r.ListenFloors(ctx, b.Floors)
-	go r.Run(ctx, b.Lifts)
+	go r.Listen(ctx, b.Floors)
+	go r.ProcessRequests(ctx, func(f int) bool { return FindLift(f, b.Lifts) })
 	
 	var stats Stats
 	go stats.Collect(ctx, b)
