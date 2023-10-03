@@ -310,11 +310,26 @@ func (f *Floor) Unload(count int) []Passenger {
 	return unloaded
 }
 
-type LiftFinder func (floorNumber int) bool
+type LiftManager struct {
+	clock int
+	Lifts []*Lift
+}
 
-func FindLift(floorNumber int, lifts []*Lift) bool {
+func NewLiftManager() *LiftManager {
+	lifts := []*Lift{
+		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
+		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
+		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 4, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 5, Passengers: make([]Passenger, 0, 5)},
+		// &Lift{ID: 6, Passengers: make([]Passenger, 0, 5)},
+	}
+	return &LiftManager{Lifts: lifts}
+}
+
+func (m *LiftManager) FindLift(floorNumber int) bool {
 	// Ask IDLE first, then the rest
-	for _, l := range lifts {
+	for _, l := range m.Lifts {
 		if l.status != IDLE {
 			continue
 		}
@@ -322,7 +337,7 @@ func FindLift(floorNumber int, lifts []*Lift) bool {
 			return true
 		}
 	}
-	for _, l := range lifts {
+	for _, l := range m.Lifts {
 		if l.status == IDLE {
 			continue
 		}
@@ -332,6 +347,32 @@ func FindLift(floorNumber int, lifts []*Lift) bool {
 	}
 	return false
 }
+
+func (m *LiftManager) Run(ctx context.Context, floors map[int]*Floor) {
+	worldTicker := time.NewTicker(tickDuration)
+	liftTickers := make([]chan struct{}, 0, len(m.Lifts))
+	for _, l := range m.Lifts {
+		t := make(chan struct{}, 1)
+		liftTickers = append(liftTickers, t)
+		go l.Run(t, floors)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			for _, c := range liftTickers {
+				close(c)
+			}
+			return
+		case <-worldTicker.C:
+			m.clock++
+			for _, c := range liftTickers {
+				c <- struct{}{}
+			}
+		}
+	}
+}
+
+type LiftFinder func (floorNumber int) bool
 
 type RequestManager struct {
 	m sync.Mutex
@@ -392,9 +433,7 @@ func (r *RequestManager) ProcessRequests(ctx context.Context, liftFinder LiftFin
 }
 
 type Building struct {
-	Clock int // Counts world's ticks, 1 tick is the time required for a lift to move 1 floor
 	Floors map[int]*Floor
-	Lifts []*Lift
 }
 
 func NewBuilding(floorsCount int) *Building {
@@ -402,47 +441,10 @@ func NewBuilding(floorsCount int) *Building {
 	for i := 0; i < floorsCount; i++ {
 		floors[i] = NewFloor(i)
 	}
-
-	lifts := []*Lift{
-		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
-		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
-		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 4, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 5, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 6, Passengers: make([]Passenger, 0, 5)},
-	}
-
-	return &Building{
-		Floors: floors,
-		Lifts: lifts,
-	}
+	return &Building{Floors: floors}
 }
 
-func (b *Building) RunLifts(ctx context.Context) {
-	worldTicker := time.NewTicker(tickDuration)
-	liftTickers := make([]chan struct{}, 0, len(b.Lifts))
-	for _, l := range b.Lifts {
-		t := make(chan struct{}, 1)
-		liftTickers = append(liftTickers, t)
-		go l.Run(t, b.Floors)
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			for _, c := range liftTickers {
-				close(c)
-			}
-			return
-		case <-worldTicker.C:
-			b.Clock++
-			for _, c := range liftTickers {
-				c <- struct{}{}
-			}
-		}
-	}
-}
-
-func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
+func (b *Building) SpawnPassengers(ctx context.Context, m *LiftManager, maxPassengers int) {
 	ticker := time.NewTicker(2*tickDuration)
 	count := 0
 	for {
@@ -464,7 +466,7 @@ func SpawnPassengers(ctx context.Context, b *Building, maxPassengers int) {
 			p := Passenger{
 				StartingFloor: spawnFloorNumber,
 				TargetFloor: targetFloor,
-				Born: b.Clock,
+				Born: m.clock,
 			}
 			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
 			b.Floors[spawnFloorNumber].AddPassenger(p)
@@ -483,7 +485,7 @@ type Stats struct {
 	Moving int
 }
 
-func (s *Stats) Collect(ctx context.Context, b *Building) {
+func (s *Stats) Collect(ctx context.Context, floors map[int]*Floor, lifts []*Lift) {
 	ticker := time.NewTicker(tickDuration)
 	for {
 		select {
@@ -492,13 +494,13 @@ func (s *Stats) Collect(ctx context.Context, b *Building) {
 		case <-ticker.C:
 			s.Waiting = 0
 			s.Delivered = 0
-			for _, f := range b.Floors {
+			for _, f := range floors {
 				s.Waiting += len(f.Waitlist)
 				s.Delivered += len(f.Delivered)
 			}
 
 			s.Moving = 0
-			for _, l := range b.Lifts {
+			for _, l := range lifts {
 				s.Moving += len(l.Passengers)
 			}
 			log.Info(fmt.Sprintf("%+v", s))
@@ -539,16 +541,18 @@ func main() {
 	maxPassengers := 1000
 
 	b := NewBuilding(floorsCount)
-	go b.RunLifts(ctx)
+
+	m := NewLiftManager()
+	go m.Run(ctx, b.Floors)
 
 	r := NewRequestManager(floorsCount)
 	go r.Listen(ctx, b.Floors)
-	go r.ProcessRequests(ctx, func(f int) bool { return FindLift(f, b.Lifts) })
+	go r.ProcessRequests(ctx, m.FindLift)
 	
 	var stats Stats
-	go stats.Collect(ctx, b)
+	go stats.Collect(ctx, b.Floors, m.Lifts)
 
-	go SpawnPassengers(ctx, b, maxPassengers)
+	go b.SpawnPassengers(ctx, m, maxPassengers)
 
 main_loop:
 	for stats.Delivered != maxPassengers {
