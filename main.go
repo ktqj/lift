@@ -41,7 +41,7 @@ const (
 	DOWN liftStatus = 1
 	UP liftStatus = 2
 
-	tickDuration = 50 * time.Microsecond
+	tickDuration = 75 * time.Microsecond
 )
 
 type Passenger struct {
@@ -229,27 +229,29 @@ func (l *Lift) Park(floor *Floor) {
 	log.Info(l.String())
 }
 
-func (l *Lift) Run(worldTicker chan struct{}, floors map[int]*Floor) {
-	for range worldTicker {
-		if l.status != IDLE {
-			log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
-		}
+func (l *Lift) Run(ctx context.Context, floors map[int]*Floor) {
+	ticker := time.NewTicker(tickDuration)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info(fmt.Sprintf("Shutting down lift #%d", l.ID))
+			return
+		case <-ticker.C:
+			if l.status != IDLE {
+				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
+			}
 
-		if l.CurrentFloor == l.CurrentDestination() {
-			l.Park(floors[l.CurrentFloor])
-		}
+			if l.CurrentFloor == l.CurrentDestination() {
+				l.Park(floors[l.CurrentFloor])
+			}
 
-		if l.status == IDLE {
-			continue
-		}
-
-		if l.status == DOWN {
-			l.CurrentFloor--
-		} else if l.status == UP {
-			l.CurrentFloor++
+			if l.status == DOWN {
+				l.CurrentFloor--
+			} else if l.status == UP {
+				l.CurrentFloor++
+			}
 		}
 	}
-	log.Info(fmt.Sprintf("Shutting down lift #%d", l.ID))
 }
 
 type Floor struct {
@@ -305,65 +307,6 @@ func (f *Floor) Unload(count int) []Passenger {
 		f.RequestLift()
 	}
 	return unloaded
-}
-
-type LiftManager struct {
-	Lifts []*Lift
-}
-
-func NewLiftManager() *LiftManager {
-	return &LiftManager{Lifts: []*Lift{
-		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
-		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
-		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 4, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 5, Passengers: make([]Passenger, 0, 5)},
-		// &Lift{ID: 6, Passengers: make([]Passenger, 0, 5)},
-	}}
-}
-
-func (m *LiftManager) FindLift(floorNumber int) bool {
-	// Ask IDLE first, then the rest
-	for _, l := range m.Lifts {
-		if l.status != IDLE {
-			continue
-		}
-		if ok := l.Call(floorNumber); ok {
-			return true
-		}
-	}
-	for _, l := range m.Lifts {
-		if l.status == IDLE {
-			continue
-		}
-		if ok := l.Call(floorNumber); ok {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *LiftManager) Run(ctx context.Context, floors map[int]*Floor) {
-	worldTicker := time.NewTicker(tickDuration)
-	liftTickers := make([]chan struct{}, 0, len(m.Lifts))
-	for _, l := range m.Lifts {
-		t := make(chan struct{}, 1)
-		liftTickers = append(liftTickers, t)
-		go l.Run(t, floors)
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			for _, c := range liftTickers {
-				close(c)
-			}
-			return
-		case <-worldTicker.C:
-			for _, c := range liftTickers {
-				c <- struct{}{}
-			}
-		}
-	}
 }
 
 type RequestManager struct {
@@ -425,6 +368,7 @@ func (r *RequestManager) ProcessRequests(ctx context.Context, liftFinder func (f
 }
 
 type Building struct {
+	Lifts []*Lift
 	Floors map[int]*Floor
 }
 
@@ -433,10 +377,15 @@ func NewBuilding(floorsCount int) *Building {
 	for i := 0; i < floorsCount; i++ {
 		floors[i] = NewFloor(i)
 	}
-	return &Building{Floors: floors}
+	lifts := []*Lift{
+		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
+		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
+		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
+	}
+	return &Building{Floors: floors, Lifts: lifts}
 }
 
-func (b *Building) SpawnPassengers(ctx context.Context, maxPassengers int) {
+func SpawnPassengers(ctx context.Context, floors map[int]*Floor, maxPassengers int) {
 	ticker := time.NewTicker(2*tickDuration)
 	for i := 0; i < maxPassengers; i++ {
 		select {
@@ -444,13 +393,13 @@ func (b *Building) SpawnPassengers(ctx context.Context, maxPassengers int) {
 			log.Info("Shutting down passenger generation")
 			return
 		case <-ticker.C:
-			spawnFloorNumber := rand.Intn(len(b.Floors))
-			targetFloor := rand.Intn(len(b.Floors))
+			spawnFloorNumber := rand.Intn(len(floors))
+			targetFloor := rand.Intn(len(floors))
 			for {
 				if spawnFloorNumber != targetFloor {
 					break
 				}
-				targetFloor = rand.Intn(len(b.Floors))
+				targetFloor = rand.Intn(len(floors))
 			}
 
 			p := Passenger{
@@ -459,9 +408,29 @@ func (b *Building) SpawnPassengers(ctx context.Context, maxPassengers int) {
 				Born: time.Now(),
 			}
 			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
-			b.Floors[spawnFloorNumber].AddPassenger(p)
+			floors[spawnFloorNumber].AddPassenger(p)
 		}
 	}
+}
+
+func FindLift(floorNumber int, lifts []*Lift) bool {
+	for _, l := range lifts {
+		if l.status != IDLE {
+			continue
+		}
+		if ok := l.Call(floorNumber); ok {
+			return true
+		}
+	}
+	for _, l := range lifts {
+		if l.status == IDLE {
+			continue
+		}
+		if ok := l.Call(floorNumber); ok {
+			return true
+		}
+	}
+	return false
 }
 
 type Stats struct {
@@ -519,25 +488,26 @@ func (s *Stats) PrintFinalStats(b *Building) {
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	sigChannel := make(chan os.Signal, 1)
-	signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
-
 	floorsCount := 25
 	maxPassengers := 1000
 
 	b := NewBuilding(floorsCount)
 
-	m := NewLiftManager()
-	go m.Run(ctx, b.Floors)
+	for _, lift := range b.Lifts {
+		go lift.Run(ctx, b.Floors)
+	}
 
 	r := NewRequestManager(floorsCount)
 	go r.Listen(ctx, b.Floors)
-	go r.ProcessRequests(ctx, m.FindLift)
+	go r.ProcessRequests(ctx, func (f int) bool { return FindLift(f, b.Lifts) })
 	
 	var stats Stats
-	go stats.Collect(ctx, b.Floors, m.Lifts)
+	go stats.Collect(ctx, b.Floors, b.Lifts)
 
-	go b.SpawnPassengers(ctx, maxPassengers)
+	go SpawnPassengers(ctx, b.Floors, maxPassengers)
+
+	sigChannel := make(chan os.Signal, 1)
+	signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
 
 main_loop:
 	for stats.Delivered != maxPassengers {
