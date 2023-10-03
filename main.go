@@ -47,9 +47,9 @@ const (
 type Passenger struct {
 	StartingFloor int
 	TargetFloor int
-	Born int  // world clock's time when spawned
-	Pickedup int  // world clock's time when entered a lift
-	Delivered int  // world clock's time when delivered
+	Born time.Time
+	Pickedup time.Time
+	Delivered time.Time
 }
 
 func (p Passenger) String() string {
@@ -58,7 +58,6 @@ func (p Passenger) String() string {
 
 type Lift struct {
 	ID int
-	Clock int
 	Passengers []Passenger
 	CurrentFloor int
 
@@ -210,7 +209,7 @@ func (l *Lift) Park(floor *Floor) {
 		if p.TargetFloor != floor.Number {
 			staying = append(staying, p)
 		} else {
-			p.Delivered = l.Clock
+			p.Delivered = time.Now()
 			floor.AddDelivered(p)
 		}
 	}
@@ -220,7 +219,7 @@ func (l *Lift) Park(floor *Floor) {
 	spotsAvailable := cap(l.Passengers) - len(l.Passengers)
 	incoming := floor.Unload(spotsAvailable)
 	for _, p := range incoming {
-		p.Pickedup = l.Clock
+		p.Pickedup = time.Now()
 		l.Passengers = append(l.Passengers, p)
 		l.PressFloorButton(p.TargetFloor)
 	}
@@ -232,8 +231,6 @@ func (l *Lift) Park(floor *Floor) {
 
 func (l *Lift) Run(worldTicker chan struct{}, floors map[int]*Floor) {
 	for range worldTicker {
-		l.Clock++
-
 		if l.status != IDLE {
 			log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
 		}
@@ -311,7 +308,6 @@ func (f *Floor) Unload(count int) []Passenger {
 }
 
 type LiftManager struct {
-	clock int
 	Lifts []*Lift
 }
 
@@ -364,7 +360,6 @@ func (m *LiftManager) Run(ctx context.Context, floors map[int]*Floor) {
 			}
 			return
 		case <-worldTicker.C:
-			m.clock++
 			for _, c := range liftTickers {
 				c <- struct{}{}
 			}
@@ -444,14 +439,13 @@ func NewBuilding(floorsCount int) *Building {
 	return &Building{Floors: floors}
 }
 
-func (b *Building) SpawnPassengers(ctx context.Context, m *LiftManager, maxPassengers int) {
+func (b *Building) SpawnPassengers(ctx context.Context, maxPassengers int) {
 	ticker := time.NewTicker(2*tickDuration)
-	count := 0
-	for {
+	for i := 1; i <= maxPassengers; i++ {
 		select {
 		case <-ctx.Done():
 			log.Info("Shutting down passenger generation")
-			log.Info(fmt.Sprintf("Spawned %d passengers in total", count))
+			log.Info(fmt.Sprintf("Spawned %d passengers in total", i))
 			return
 		case <-ticker.C:
 			spawnFloorNumber := rand.Intn(len(b.Floors))
@@ -466,15 +460,10 @@ func (b *Building) SpawnPassengers(ctx context.Context, m *LiftManager, maxPasse
 			p := Passenger{
 				StartingFloor: spawnFloorNumber,
 				TargetFloor: targetFloor,
-				Born: m.clock,
+				Born: time.Now(),
 			}
 			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
 			b.Floors[spawnFloorNumber].AddPassenger(p)
-
-			count++
-			if count == maxPassengers {
-				return
-			}
 		}
 	}
 }
@@ -509,13 +498,13 @@ func (s *Stats) Collect(ctx context.Context, floors map[int]*Floor, lifts []*Lif
 }
 
 func (s *Stats) PrintFinalStats(b *Building) {
-	totalWaitTime := 0
-	totalMovingTime := 0
+	totalWaitTime := int64(0)
+	totalMovingTime := int64(0)
 	totalFloorsMoved := 0
 	for _, f := range b.Floors {
 		for _, p := range f.Delivered {
-			totalWaitTime += p.Pickedup - p.Born
-			totalMovingTime += p.Delivered - p.Pickedup
+			totalWaitTime += p.Pickedup.Sub(p.Born).Microseconds()
+			totalMovingTime += p.Delivered.Sub(p.Pickedup).Microseconds()
 			floorsMoved := p.TargetFloor - p.StartingFloor
 			if floorsMoved < 0 { floorsMoved = -floorsMoved }
 			totalFloorsMoved += floorsMoved
@@ -525,8 +514,8 @@ func (s *Stats) PrintFinalStats(b *Building) {
 	totalPassengers := s.Delivered + s.Moving + s.Waiting
 	log.Info(fmt.Sprintf(
 		"Average passenger waited - %f ticks, was moving - %f ticks, moved - %f floors",
-		float64(totalWaitTime) / float64(totalPassengers),
-		float64(totalMovingTime) / float64(totalPassengers),
+		float64(totalWaitTime) / float64(tickDuration.Microseconds()) / float64(totalPassengers),
+		float64(totalMovingTime) / float64(tickDuration.Microseconds()) / float64(totalPassengers),
 		float64(totalFloorsMoved) / float64(totalPassengers),
 	))
 }
@@ -552,7 +541,7 @@ func main() {
 	var stats Stats
 	go stats.Collect(ctx, b.Floors, m.Lifts)
 
-	go b.SpawnPassengers(ctx, m, maxPassengers)
+	go b.SpawnPassengers(ctx, maxPassengers)
 
 main_loop:
 	for stats.Delivered != maxPassengers {
@@ -560,7 +549,7 @@ main_loop:
 		case <-sigChannel:
 			break main_loop
 		default:
-			time.Sleep(tickDuration)
+			time.Sleep(50*tickDuration)
 		}
 	}
 
