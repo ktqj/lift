@@ -7,7 +7,10 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"runtime/pprof"
 	"slices"
 	"sort"
 	"strings"
@@ -23,6 +26,13 @@ func CleanupAttrs(groups []string, a slog.Attr) slog.Attr {
 	return a
 }
 var log *slog.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{ReplaceAttr: CleanupAttrs}))
+
+func logInfo(msg string) {
+	if !loggingEnabled {
+		return
+	}
+	log.Info(msg)
+}
 
 type liftStatus int
 func (s liftStatus) String() string {
@@ -42,6 +52,8 @@ const (
 	UP liftStatus = 2
 
 	tickDuration = 75 * time.Microsecond
+	loggingEnabled = true
+	profilingEnabled = false
 )
 
 type Passenger struct {
@@ -94,7 +106,7 @@ func (l *Lift) String() string {
 
 func (l *Lift) setStatus(status liftStatus) {
 	l.status = status
-	log.Info(fmt.Sprintf("Lift #%d becomes %s", l.ID, l.status))
+	logInfo(fmt.Sprintf("Lift #%d becomes %s", l.ID, l.status))
 }
 
 func (l *Lift) IsFloorAlongTheWay(floorNumber int) bool {
@@ -140,7 +152,7 @@ func (l *Lift) Call(floorNumber int) bool {
 	defer l.m.Unlock()
 
 	if l.status == IDLE || l.IsFloorAlongTheWay(floorNumber) {
-		log.Info(fmt.Sprintf("Lift #%d accepted call to floor #%d", l.ID, floorNumber))
+		logInfo(fmt.Sprintf("Lift #%d accepted call to floor #%d", l.ID, floorNumber))
 		l.AddDestination(floorNumber)
 		return true
 	}
@@ -209,7 +221,7 @@ func (l *Lift) Park(floor *Floor) {
 			floor.AddDelivered(p)
 		}
 	}
-	log.Info(fmt.Sprintf("Lift #%d unloads %d passengers", l.ID, len(l.Passengers) - len(staying)))
+	logInfo(fmt.Sprintf("Lift #%d unloads %d passengers", l.ID, len(l.Passengers) - len(staying)))
 	l.Passengers = staying
 
 	spotsAvailable := cap(l.Passengers) - len(l.Passengers)
@@ -219,10 +231,10 @@ func (l *Lift) Park(floor *Floor) {
 		l.Passengers = append(l.Passengers, p)
 		l.PressFloorButton(p.TargetFloor)
 	}
-	log.Info(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
+	logInfo(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
 
 	l.UpdateRoute()
-	log.Info(l.String())
+	logInfo(l.String())
 }
 
 func (l *Lift) Run(ctx context.Context, floors map[int]*Floor) {
@@ -230,11 +242,11 @@ func (l *Lift) Run(ctx context.Context, floors map[int]*Floor) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info(fmt.Sprintf("Shutting down lift #%d", l.ID))
+			logInfo(fmt.Sprintf("Shutting down lift #%d", l.ID))
 			return
 		case <-ticker.C:
 			if l.status != IDLE {
-				log.Info(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
+				logInfo(fmt.Sprintf("Lift #%d arrives at floor #%d", l.ID, l.CurrentFloor))
 			}
 
 			if l.CurrentFloor == l.CurrentDestination() {
@@ -258,11 +270,11 @@ type Floor struct {
 	button chan struct{}  // buffered with capacity of 1
 }
 
-func NewFloor(floorNumber int) *Floor {
+func NewFloor(floorNumber int, capacityHint int) *Floor {
 	return &Floor{
 		Number: floorNumber,
-		Waitlist: make(Passengers, 0),
-		Delivered: make(Passengers, 0),
+		Waitlist: make(Passengers, 0, capacityHint),
+		Delivered: make(Passengers, 0, capacityHint),
 		button: make(chan struct{}, 1),
 	}
 }
@@ -299,7 +311,7 @@ func (f *Floor) Unload(count int) Passengers {
 		left := f.Waitlist[:0]
 		left = append(left, f.Waitlist[count:]...)
 		f.Waitlist = left
-		log.Info(fmt.Sprintf("%d passengers are left on floor #%d", len(left), f.Number))
+		logInfo(fmt.Sprintf("%d passengers are left on floor #%d", len(left), f.Number))
 		f.RequestLift()
 	}
 	return unloaded
@@ -329,7 +341,7 @@ func (r *RequestManager) Listen(ctx context.Context, floors map[int]*Floor) {
 	for {
 		floorNumber, _, _ := reflect.Select(cases)
 		if floorNumber == len(floors) {
-			log.Info("Shutting down request manager")
+			logInfo("Shutting down request manager")
 			return
 		}
 		r.m.Lock()
@@ -345,7 +357,7 @@ func (r *RequestManager) ProcessRequests(ctx context.Context, liftFinder func (f
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info("Shutting down lift controller")
+			logInfo("Shutting down lift controller")
 			return
 		case <-ticker.C:
 			r.m.Lock()
@@ -357,7 +369,7 @@ func (r *RequestManager) ProcessRequests(ctx context.Context, liftFinder func (f
 				n = append(n, floorNumber)
 			}
 			r.backlog = n
-			log.Info(fmt.Sprintf("Pending requests: %v", r.backlog))
+			logInfo(fmt.Sprintf("Pending requests: %v", r.backlog))
 			r.m.Unlock()
 		}
 	}
@@ -368,10 +380,10 @@ type Building struct {
 	Floors map[int]*Floor
 }
 
-func NewBuilding(floorsCount int) *Building {
+func NewBuilding(floorsCount int, maxPassengers int) *Building {
 	floors := make(map[int]*Floor, floorsCount)
 	for i := 0; i < floorsCount; i++ {
-		floors[i] = NewFloor(i)
+		floors[i] = NewFloor(i, maxPassengers/20)
 	}
 	lifts := []*Lift{
 		&Lift{ID: 1, Passengers: make(Passengers, 0, 5)},
@@ -386,7 +398,7 @@ func SpawnPassengers(ctx context.Context, floors map[int]*Floor, maxPassengers i
 	for i := 0; i < maxPassengers; i++ {
 		select {
 		case <-ctx.Done():
-			log.Info("Shutting down passenger generation")
+			logInfo("Shutting down passenger generation")
 			return
 		case <-ticker.C:
 			spawnFloorNumber := rand.Intn(len(floors))
@@ -403,7 +415,7 @@ func SpawnPassengers(ctx context.Context, floors map[int]*Floor, maxPassengers i
 				TargetFloor: targetFloor,
 				Born: time.Now(),
 			}
-			log.Info(fmt.Sprintf("Spawning passenger %s", p.String()))
+			logInfo(fmt.Sprintf("Spawning passenger %s", p.String()))
 			floors[spawnFloorNumber].AddPassenger(p)
 		}
 	}
@@ -453,7 +465,7 @@ func (s *Stats) Collect(ctx context.Context, floors map[int]*Floor, lifts []*Lif
 			for _, l := range lifts {
 				s.Moving += len(l.Passengers)
 			}
-			log.Info(fmt.Sprintf("%+v", s))
+			logInfo(fmt.Sprintf("%+v", s))
 		}
 	}
 }
@@ -463,6 +475,7 @@ func (s *Stats) PrintFinalStats(b *Building) {
 	totalMovingTime := int64(0)
 	totalFloorsMoved := 0
 	for _, f := range b.Floors {
+		// println(len(f.Delivered), len(f.Waitlist))
 		for _, p := range f.Delivered {
 			totalWaitTime += p.Pickedup.Sub(p.Born).Microseconds()
 			totalMovingTime += p.Delivered.Sub(p.Pickedup).Microseconds()
@@ -473,7 +486,7 @@ func (s *Stats) PrintFinalStats(b *Building) {
 	}
 
 	totalPassengers := s.Delivered + s.Moving + s.Waiting
-	log.Info(fmt.Sprintf(
+	logInfo(fmt.Sprintf(
 		"Average passenger waited - %f ticks, was moving - %f ticks, moved - %f floors",
 		float64(totalWaitTime) / float64(tickDuration.Microseconds()) / float64(totalPassengers),
 		float64(totalMovingTime) / float64(tickDuration.Microseconds()) / float64(totalPassengers),
@@ -482,12 +495,20 @@ func (s *Stats) PrintFinalStats(b *Building) {
 }
 
 func main() {
+	if profilingEnabled {
+		wd, _ := os.Getwd()
+		cpuf, _ := os.Create(filepath.Join(wd, "cpu.prof"))
+		defer cpuf.Close()
+		pprof.StartCPUProfile(cpuf)
+		defer pprof.StopCPUProfile()
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	floorsCount := 25
-	maxPassengers := 1000
+	maxPassengers := 10000
 
-	b := NewBuilding(floorsCount)
+	b := NewBuilding(floorsCount, maxPassengers)
 
 	for _, lift := range b.Lifts {
 		go lift.Run(ctx, b.Floors)
@@ -517,4 +538,12 @@ main_loop:
 
 	cancel()
 	stats.PrintFinalStats(b)
+
+	if profilingEnabled {
+		wd, _ := os.Getwd()
+		memf, _ := os.Create(filepath.Join(wd, "mem.prof"))
+		defer memf.Close()
+		runtime.GC()
+		pprof.WriteHeapProfile(memf)
+	}
 }
