@@ -51,14 +51,24 @@ type Passenger struct {
 	Pickedup time.Time
 	Delivered time.Time
 }
-
 func (p Passenger) String() string {
 	return fmt.Sprintf("P[%d->%d]", p.StartingFloor, p.TargetFloor)
 }
 
+type Passengers []Passenger
+func (ps Passengers) String() string {
+	var b strings.Builder
+	b.WriteString("[")
+	for _, p := range ps {
+		b.WriteString(p.String())
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
 type Lift struct {
 	ID int
-	Passengers []Passenger
+	Passengers Passengers
 	CurrentFloor int
 
 	backlog []int  // floors to be visited after finishing current run
@@ -74,25 +84,17 @@ func (l *Lift) String() string {
 	b.WriteString(separator)
 	b.WriteString(l.status.String())
 	b.WriteString(separator)
-	b.WriteString("[")
-	for _, p := range l.Passengers {
-		b.WriteString(p.String())
-	}
-	b.WriteString("]")
+	b.WriteString(l.Passengers.String())
 	b.WriteString(separator)
-	b.WriteString(fmt.Sprintf("%v%s%v", l.destinations, separator, l.backlog))
+	b.WriteString(fmt.Sprintf("%v", l.destinations))
+	b.WriteString(separator)
+	b.WriteString(fmt.Sprintf("%v", l.backlog))
 	return b.String()
 }
 
 func (l *Lift) setStatus(status liftStatus) {
 	l.status = status
-	if l.status == IDLE {
-		log.Info(fmt.Sprintf("Lift #%d becomes idle", l.ID))
-	} else if l.status == UP {
-		log.Info(fmt.Sprintf("Lift #%d starts going up", l.ID))
-	} else if l.status == DOWN {
-		log.Info(fmt.Sprintf("Lift #%d starts going down", l.ID))
-	}
+	log.Info(fmt.Sprintf("Lift #%d becomes %s", l.ID, l.status))
 }
 
 func (l *Lift) IsFloorAlongTheWay(floorNumber int) bool {
@@ -122,12 +124,14 @@ func (l *Lift) AddDestination(floorNumber int) {
 	l.destinations = append(l.destinations, floorNumber)
 	sort.Slice(l.destinations, func(i, j int) bool { return l.destinations[i] < l.destinations[j] })
 
-	if l.status == IDLE {
-		if l.CurrentFloor >= floorNumber {
-			l.setStatus(DOWN)
-		} else if l.CurrentFloor < floorNumber{
-			l.setStatus(UP)
-		}
+	if l.status != IDLE {
+		return
+	}
+
+	if l.CurrentFloor >= floorNumber {
+		l.setStatus(DOWN)
+	} else if l.CurrentFloor < floorNumber{
+		l.setStatus(UP)
 	}
 }
 
@@ -162,10 +166,7 @@ func (l *Lift) UpdateRoute() {
 		l.destinations = l.destinations[:len(l.destinations) - 1]
 	} else if l.status == UP {
 		// pop first element
-		n := l.destinations[:0]
-		l.destinations = append(n, l.destinations[1:]...)
-	}else if l.status == IDLE {
-		l.destinations = l.destinations[:0]
+		l.destinations = append(l.destinations[:0], l.destinations[1:]...)
 	}
 
 	if len(l.destinations) != 0 {
@@ -192,18 +193,13 @@ func (l *Lift) CurrentDestination() int {
 
 	if l.status == DOWN {
 		return l.destinations[len(l.destinations) - 1]
-	}
-	if l.status == UP {
-		return l.destinations[0]
-	}
-	if l.status == IDLE && len(l.destinations) > 0 {
+	} else if l.status == UP {
 		return l.destinations[0]
 	}
 	return -1
 }
 
 func (l *Lift) Park(floor *Floor) {
-	log.Info(fmt.Sprintf("Lift #%d opens doors on floor #%d", l.ID, floor.Number))
 	staying := l.Passengers[:0]
 	for _, p := range l.Passengers {
 		if p.TargetFloor != floor.Number {
@@ -223,8 +219,8 @@ func (l *Lift) Park(floor *Floor) {
 		l.Passengers = append(l.Passengers, p)
 		l.PressFloorButton(p.TargetFloor)
 	}
-
 	log.Info(fmt.Sprintf("Lift #%d loads %d passengers", l.ID, len(incoming)))
+
 	l.UpdateRoute()
 	log.Info(l.String())
 }
@@ -256,8 +252,8 @@ func (l *Lift) Run(ctx context.Context, floors map[int]*Floor) {
 
 type Floor struct {
 	Number int
-	Delivered []Passenger
-	Waitlist []Passenger
+	Delivered Passengers
+	Waitlist Passengers
 	m sync.Mutex  // protects Waitlist and Delivered
 	button chan struct{}  // buffered with capacity of 1
 }
@@ -265,8 +261,8 @@ type Floor struct {
 func NewFloor(floorNumber int) *Floor {
 	return &Floor{
 		Number: floorNumber,
-		Waitlist: make([]Passenger, 0),
-		Delivered: make([]Passenger, 0),
+		Waitlist: make(Passengers, 0),
+		Delivered: make(Passengers, 0),
 		button: make(chan struct{}, 1),
 	}
 }
@@ -291,10 +287,10 @@ func (f *Floor) AddDelivered(p Passenger) {
 	f.Delivered = append(f.Delivered, p)
 }
 
-func (f *Floor) Unload(count int) []Passenger {
+func (f *Floor) Unload(count int) Passengers {
 	f.m.Lock()
 	defer f.m.Unlock()
-	unloaded := make([]Passenger, 0)
+	unloaded := make(Passengers, 0)
 	if count >= len(f.Waitlist) {
 		unloaded = append(unloaded, f.Waitlist...)
 		f.Waitlist = f.Waitlist[:0]
@@ -378,9 +374,9 @@ func NewBuilding(floorsCount int) *Building {
 		floors[i] = NewFloor(i)
 	}
 	lifts := []*Lift{
-		&Lift{ID: 1, Passengers: make([]Passenger, 0, 5)},
-		&Lift{ID: 2, Passengers: make([]Passenger, 0, 5)},
-		&Lift{ID: 3, Passengers: make([]Passenger, 0, 5)},
+		&Lift{ID: 1, Passengers: make(Passengers, 0, 5)},
+		&Lift{ID: 2, Passengers: make(Passengers, 0, 5)},
+		&Lift{ID: 3, Passengers: make(Passengers, 0, 5)},
 	}
 	return &Building{Floors: floors, Lifts: lifts}
 }
